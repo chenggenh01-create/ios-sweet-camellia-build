@@ -2,63 +2,17 @@
 
 Redmi Note 10 5G（**camellia** / MediaTek **MT6833**）上跑 iOS 16.7.16（20H392）用户态的 bring-up 工程。
 
-> 现状（2026-11-08）：**整屏 iOS 锁屏已经显示**（时间/日期/相机/Home 条），SpringBoard 正常出 UI；
-> **触摸尚未打通**（M5），锁屏不能上滑解锁，Settings 还进不去。
+> **现状（2026-11-15）**：**触摸已打通**——可进桌面、点开「设置 → 关于本机」、正常滑动；
+> 当前基线 **163**（`boot_iosroot163.img`，SHA256 `6C057E70…`）。
+> 主要缺口：**iOS 侧不能充电**（缺 MT6360/MT6359 充电+电量计驱动）、性能偏卡（单核/无 GPU）。
 
-## 仓库内容
+## 目标
 
-```
-xnu/patches/        我们改的 XNU 内核补丁（0082–0211）
-tools/              打包 / 刷机 / 分析工具
-  mk_device_boot.py   boot.img 打包（loader + kernel + ADT + cmdline）
-  bootimg.py          Android boot image 封装
-  mkadt_camellia.py   设备树（ADT）
-  fetch_kernel.py     从 GitHub Actions artifact 拉内核
-  gh_commit.py        通过 Git Data API 提交补丁
-  video_frames.py     手机视频抽帧（实验分析）
-  ...
-shim/               boot.img 里的 loader 源码（start.S / loader.c / ufs.c / mmu.c / ...）
-root/               iOS root 构建/调整脚本（mkiosroot.sh / sweet-root-tweaks.py）
-docs/               构建与刷机文档
-```
+- **A（主目标）：实验机** —— 尽可能多子系统可用：触控、电源/按键/充电、Wi-Fi、音频、稳定运行。
+- **B（条件目标）：日常机** —— 只有 A 稳定后才评估 GPU/Metal、相机、蓝牙、基带通话；
+  其中相机/基带目前判断为基本不可达。
 
-## 构建链
-
-1. **内核**：上游 XNU + `xnu/patches/` 按文件名字典序应用，GitHub Actions 构建
-   `kernel.development.camellia`。
-2. **boot.img**：`tools/mk_device_boot.py` 把
-   - kernel 槽：`shim` loader
-   - ramdisk 槽：SWEETXNU payload（内核 + ADT + cmdline）
-   - dtb 槽：原厂 dtb
-   打成 `boot_iosrootNNN.img`。
-3. **iOS root**：`root/mkiosroot.sh` 从 iPhone10,3 16.7.16 (20H392) IPSW 构建 16 GiB HFS+ 镜像，
-   再用 `root/sweet-root-tweaks.py` 打迁移/Setup/容器/音频等补丁。
-
-## 刷机
-
-只写 `boot_a`（iOS root 在 `userdata`）：
-
-```bash
-fastboot flash boot boot_iosroot142.img
-fastboot reboot
-```
-
-刷 userdata（换 root 时）：
-
-```bash
-fastboot -S 64M flash userdata iosroot-20H392.img
-```
-
-LK 的 `max-download-size` 是 128 MiB，所以必须 `-S 64M`；最后 4.8 MB 会报
-`sparse image write failure`，但前 184 块足够 HFS 挂载。
-
-## 关键点
-
-- 只写 `boot_a`；`boot_b`、dtbo、super、modem、persist 不动。
-- 这台 LK 不支持 `fastboot boot`，必须 `flash boot` 后重启。
-- 16 GiB userdata root 不适合放 Git；用 Release/网盘单独分发。
-- 触摸驱动 `shim` 之外的 `sweet_touch.c` 目前是 Qualcomm Sweet 的 GCC/TLMM/SE7 实现，
-  **不适用于 MT6833**；M5 需要写 MTK 的 I2C/GPIO（或 bit-bang）触摸驱动。
+路线与验收见 [`docs/33_路线_实验机A_2026-11-14.md`](docs/33_路线_实验机A_2026-11-14.md)。
 
 ## 状态
 
@@ -68,8 +22,74 @@ LK 的 `max-download-size` 是 128 MiB，所以必须 `-S 64M`；最后 4.8 MB �
 | M1 显示 | ✅ |
 | M2 XNU | ✅ |
 | M3 UFS + iOS root + launchd | ✅ |
-| M4 锁屏/桌面 | ✅（2026-11-08） |
-| M5 触摸/设置 | ⛔ 触摸驱动待写 |
+| M4 锁屏/桌面 | ✅ |
+| M5 触摸 | ✅（2026-11-13 打通，163 基线） |
+| A2 电源/充电/按键 | ⛔ 缺 MT6360/MT6359 PMIC 驱动 |
+| A3 Wi-Fi / A4 音频 | ⛔ 未开始 |
+| A5 性能（SMP/present） | 🟡 降分辨率路线失败；SMP 待探测 |
+
+## 仓库内容
+
+```
+xnu/patches/        我们改的 XNU 内核补丁（0082–0229）
+tools/              打包 / 刷机 / 分析工具
+  unpack_super.py     原厂 super.img 拆包（取触摸固件）
+  mk_device_boot.py   boot.img 打包（loader + kernel + ADT + cmdline）
+  fetch_kernel.py     从 GitHub Actions artifact 拉内核
+  gh_commit.py        通过 Git Data API 提交补丁
+touch/              触摸相关：驱动快照、NT36672C 固件、厂商参考源码
+docs/               构建/刷机/交班文档
+  evidence/         上机记录与固件证据
+shim/               boot.img 里的 loader 源码
+root/               iOS root 构建/调整脚本
+```
+
+## 触摸链路（M5，已打通）
+
+- IC：Novatek **NT36672C**（PID 5949，fw 18，18×36，1080×2400）；
+- 总线：SPI4 bit-bang（MI=GPIO12、MO=13、CLK=97、CS=98），reset=GPIO15，IRQ=14；
+- 事件页 **0x22D00**（trim `0c 00 00 72 66 03` → NT36675 map）；
+- 每次开机需下载固件到 SRAM（固件取自原厂 `super.img` 的
+  `vendor/firmware/nt36672c_tm_01_ts_fw.bin`，139,264 B）；
+- 10ms 轮询 65 字节报文 → 10 指解析 → `sweet_hid_touch()` → SpringBoard。
+
+补丁：`0212`–`0226`；厂商参考源码与固件在 `touch/`。
+
+## 构建链
+
+1. **内核**：上游 XNU + `xnu/patches/` 按文件名字典序应用，GitHub Actions 构建
+   `kernel.development.camellia`。
+2. **boot.img**：`tools/mk_device_boot.py` 把 kernel 槽（shim loader）、ramdisk 槽
+   （SWEETXNU payload：内核+ADT+cmdline）、dtb 槽（原厂 dtb）打包。
+3. **iOS root**：`root/mkiosroot.sh` 从 iPhone10,3 16.7.16 IPSW 构建 HFS+ 镜像，
+   再用 `root/sweet-root-tweaks.py` 打迁移/Setup/容器补丁。
+
+## 刷机
+
+只写 `boot_a`（iOS root 在 `userdata`）：
+
+```bash
+fastboot flash boot boot_iosroot163.img
+fastboot reboot
+```
+
+## 关键点 / 红线
+
+- 只写 `boot_a`；`boot_b`、dtbo、super、modem、persist 不动；`sweetlog=0`。
+- 这台 LK 不支持 `fastboot boot`，必须 `flash boot` 后重启。
+- **iOS 侧不能充电**：插充电器电压仍下降；需临时刷原厂 `boot.img` 进
+  recovery/Android 充电，充满后刷回 163（详见交班 33）。
+- cmdline 关键参数放最前面，长度 < 512；每次构建后必须 `strings` 验证补丁生效
+  （`build.sh` 会静默跳过 apply 失败的补丁）。
+- 16 GiB userdata root 不适合放 Git；用 Release/网盘单独分发。
+
+## 文档
+
+- [`docs/30_交接_2026-11-13_触控打通与性能.md`](docs/30_交接_2026-11-13_触控打通与性能.md)
+- [`docs/31_交接_2026-11-13_详细.md`](docs/31_交接_2026-11-13_详细.md)
+- [`docs/32_交接_2026-11-14_性能优化.md`](docs/32_交接_2026-11-14_性能优化.md)
+- [`docs/33_路线_实验机A_2026-11-14.md`](docs/33_路线_实验机A_2026-11-14.md)
+- [`touch/README_touch.md`](touch/README_touch.md)
 
 ## 许可 / 来源
 
