@@ -73,7 +73,8 @@ root/               iOS root 构建/调整脚本
 呈现参数（`SweetFramebuffer`）：
 
 - 全屏帧率上限 ≈ `sweetfb_hz × sweetpresentwindow / 2400`；
-- 当前稳定基线：**3 核 + `sweetfb_hz=60` + `sweetpresentwindow=1200`**（30fps 上限）；
+- 当前稳定基线：**3 核 + `sweetfb_hz=60` + `sweetpresentwindow=960`**（24fps 上限）；
+  1200（30fps）/1600（40fps）手感更好但长时间稳定性不足，按需上调；
 - 已知问题：**≥4 核 + 高呈现负载**会卡在苹果标（呈现/定时器并发，待重构修复）。
 
 ## 构建链
