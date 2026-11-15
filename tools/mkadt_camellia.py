@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Minimal Apple Device Tree for camellia (Redmi Note 10 5G, MT6833).
 
 Ported from third_party/ios-sweet/tools/mkadt.py (sweet/SM7150) with the
@@ -88,7 +88,7 @@ def build():
         ('random-seed', os.urandom(64)),
         ('debug-enabled', u32(1)),
         ('embedded-panic-log-size', u32(PANIC_LOG_SIZE)),
-        ('firmware-version', cstr('camellia-shim')),
+        ('firmware-version', cstr('camellia-shim') + (b'X' * (1200 if os.environ.get('ADT_PAD_CHOSEN') else 0)) + cstr('')),
         ('system-firmware-version', cstr('camellia-shim')),
         ('boot-manifest-hash', BOOT_MANIFEST_HASH),
         ('crypto-hash-method', cstr('sha2-384')),
@@ -104,30 +104,45 @@ def build():
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))]),
     ])
 
-    # One A55 core first (cpus=1); MPIDR 0 is the boot CPU.
-    cpus = node('cpus', [ph(), ('#address-cells', u32(1)),
-                         ('#size-cells', u32(0))], [
-        node('cpu0', [
+    # 8 cores: 6x Cortex-A55 (MPIDR 0x000-0x500) + 2x Cortex-A76 (0x600/0x700).
+    # machine_routines.c builds ml_topology from the number of /cpus children,
+    # so the ADT must publish every core for SMP (SweetCPU.cpp) to start them.
+    cpu_nodes = []
+    for i in range(int(os.environ.get("ADT_CPUS", "8"))):
+        if i < 6:
+            compat = cstr('qcom,kryo470') + cstr('ARM,v8')
+            ctype = u32(0)
+            freq = u32(CPU_CLOCK)
+            cluster = 0
+            core = i
+        else:
+            compat = cstr('qcom,kryo470') + cstr('ARM,v8')
+            ctype = u32(0)
+            freq = u32(2200000000)
+            cluster = 0
+            core = i - 6
+        cpu_nodes.append(node('cpu%d' % i, [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('arm,cortex-a55') + cstr('ARM,v8')),
-            ('reg', u32(0)),
-            ('cpu-id', u32(0)),
-            ('cluster-id', u32(0)),
-            ('cluster-type', u32(0)),
+            ('compatible', compat),
+            ('reg', u32(i << 8)),
+            ('cpu-id', u32(i)),
+            ('cluster-id', u32(cluster)),
+            ('cluster-type', ctype),
             ('die-cluster-id', u32(0)),
-            ('cluster-core-id', u32(0)),
-            ('l2-cache-id', u32(0)),
+            ('cluster-core-id', u32(core)),
+            ('l2-cache-id', u32(i)),
             ('l3-cache-id', u32(0)),
-            ('state', cstr('running')),
+            ('state', cstr('running' if i == 0 else 'stopped')),
             ('timebase-frequency', u32(TIMEBASE)),
-            ('clock-frequency', u32(CPU_CLOCK)),
+            ('clock-frequency', freq),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(TIMEBASE)),
             ('fixed-frequency', u32(TIMEBASE)),
-        ]),
-    ])
+        ]))
+    cpus = node('cpus', [ph(), ('#address-cells', u32(1)),
+                         ('#size-cells', u32(0))], cpu_nodes)
 
     gic = node('gic', [
         ph(),
@@ -172,6 +187,8 @@ def build():
     pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
 
     children = [chosen, defaults, cpus, arm_io, fbcon, buttons, pram]
+    if os.environ.get('ADT_DUMMY_ROOT'):
+        children.append(node('dummy-pad', [ph(), ('pad', bytes(800))]))
     if UFS:
         # bsd/dev/sweet_ufs.c: SecureDTLookupEntry(NULL, "/sweet-ufs") + reg
         children.append(node('sweet-ufs', [ph(), ('reg', u64(UFS, UFS_SIZE))]))
@@ -197,6 +214,10 @@ def build():
 if __name__ == '__main__':
     root = build()
     blob = adt.serialize(root)
+    # ADT/device-tree data must end on an 8-byte boundary (XNU parses
+    # properties as aligned words); an unaligned tail makes early boot
+    # read past the blob and die before the console exists.
+    blob += bytes((8 - len(blob) % 8) % 8)  # pad8
     out = sys.argv[1] if len(sys.argv) > 1 else 'camellia.adt'
     open(out, 'wb').write(blob)
     print(f'wrote {out} ({len(blob)} bytes)')
