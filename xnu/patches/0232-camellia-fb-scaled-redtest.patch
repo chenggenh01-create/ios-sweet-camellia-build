@@ -1,0 +1,25 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -517,7 +517,21 @@
+ 			dx = dy = 0;
+ 		}
+ 		if (fScaled) {
++			static unsigned scaled_test;
+ 			int32_t dyp, dye, dxp, dxe, dw, dh;
++
++			if (scaled_test < 120) {
++				scaled_test++;
++				for (int32_t yy = 0; yy < (int32_t)fHeight; yy++) {
++					for (int32_t xx = 0; xx < (int32_t)fWidth; xx++) {
++						*(uint32_t *)(dst + (uint64_t)yy * fRowBytes +
++						    (uint64_t)xx * 4) = 0x00FF0000;
++					}
++				}
++				OSSynchronizeIO();
++				s->release();
++				continue;
++			}
+ 
+ 			/* Layer rect is in logical coordinates; clamp to the logical screen. */
+ 			if (dx >= (int32_t)fLogicalW || dy >= (int32_t)fLogicalH) {
