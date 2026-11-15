@@ -1,0 +1,42 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -679,7 +679,7 @@
+ static void
+ touch_hid_loop(void)
+ {
+-	unsigned poll_ms = 10, secs = 1800;
++	unsigned poll_ms = 15, secs = 1800;
+ 	uint8_t rep[NVT_REPORT_LEN];
+ 
+ 	(void)PE_parse_boot_argn("sweettouchpoll", &poll_ms, sizeof(poll_ms));
+@@ -695,7 +695,28 @@
+ 	nvt_set_page(st.page);
+ 	unsigned bad = 0;
+ 	for (unsigned t = 0; t < secs * 1000u && !st.dead; t += poll_ms) {
+-		nvt_read_latched(st.page, rep, NVT_REPORT_LEN);
++		uint8_t hdr[6];
++		bool idle = true;
++
++		/* Fast path: only the first 6 bytes are needed to know there is
++		 * no contact; skip the remaining 59 bytes when idle. */
++		nvt_read_latched(st.page, hdr, 6);
++		for (unsigned k = 0; k < 6; k++) {
++			if (hdr[k] != 0x77 && hdr[k] != 0xFD && hdr[k] != 0xFE &&
++			    hdr[k] != 0xFF && hdr[k] != 0x00) {
++				idle = false;
++				break;
++			}
++		}
++		for (unsigned k = 0; k < NVT_REPORT_LEN; k++) {
++			rep[k] = 0;
++		}
++		for (unsigned k = 0; k < 6; k++) {
++			rep[k] = hdr[k];
++		}
++		if (!idle) {
++			nvt_read_latched(st.page + 6, rep + 6, NVT_REPORT_LEN - 6);
++		}
+ 		if (rep[0] == 0xFE || rep[0] == 0xFF) {
+ 			/* Bus/chip not answering: re-download the firmware once. */
+ 			if (++bad >= 200) {
