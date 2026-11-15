@@ -1,0 +1,26 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -693,8 +693,22 @@
+ 	printf("SWEET TOUCH HID: polling page %05x every %u ms\n", st.page,
+ 	    poll_ms);
+ 	nvt_set_page(st.page);
++	unsigned bad = 0;
+ 	for (unsigned t = 0; t < secs * 1000u && !st.dead; t += poll_ms) {
+ 		nvt_read_latched(st.page, rep, NVT_REPORT_LEN);
++		if (rep[0] == 0xFE || rep[0] == 0xFF) {
++			/* Bus/chip not answering: re-download the firmware once. */
++			if (++bad >= 200) {
++				bad = 0;
++				printf("SWEET TOUCH HID: dead bus, re-booting fw\n");
++				st.fw_result = nvt_boot_fw();
++				printf("SWEET TOUCH HID: fw retry result=%d\n",
++				    st.fw_result);
++				nvt_set_page(st.page);
++			}
++		} else {
++			bad = 0;
++		}
+ 		touch_hid_frame(rep);
+ 		if ((st.passes % 500) == 0) {
+ 			printf("SWEET TOUCH HID: alive frames=%u events=%u "
