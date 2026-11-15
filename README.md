@@ -54,7 +54,27 @@ root/               iOS root 构建/调整脚本
   `vendor/firmware/nt36672c_tm_01_ts_fw.bin`，139,264 B）；
 - 10ms 轮询 65 字节报文 → 10 指解析 → `sweet_hid_touch()` → SpringBoard。
 
-补丁：`0212`–`0226`；厂商参考源码与固件在 `touch/`。
+补丁：`0212`–`0233`；厂商参考源码与固件在 `touch/`。
+
+## SMP 与呈现性能（2026-11-15）
+
+**SMP 已打通**：8 核（6×A55 + 2×A76）内核全部启动，控制台版完整跑到用户态。
+
+关键点：
+
+- 内核实际按 **SWEET 板级配置**编译（`MakeInc.def`：`MACHINE_FLAGS_ARM64_CAMELLIA =
+  -DARM64_BOARD_CONFIG_SWEET -DSWEET`），因此 `SweetCPU` 生效；
+- CPU 节点必须 `compatible = qcom,kryo470`（匹配 `SweetCPU` 的 `IONameMatch`），
+  `cluster-type = 0`（同构）、只有 **cpu0 `state=running`**、其余 `stopped`、`reg = i<<8`；
+- ADT 生成器：`tools/mkadt_camellia.py`，`ADT_CPUS=N` 控制 CPU 节点数，
+  **多核 ADT 必须带 `--fb1`**（否则 `/sweet-fbcon` 指向错误 buffer，屏幕上没有日志）；
+- cmdline 的 `cpus=N` 必须与 ADT 节点数一致。
+
+呈现参数（`SweetFramebuffer`）：
+
+- 全屏帧率上限 ≈ `sweetfb_hz × sweetpresentwindow / 2400`；
+- 当前稳定基线：**3 核 + `sweetfb_hz=60` + `sweetpresentwindow=1200`**（30fps 上限）；
+- 已知问题：**≥4 核 + 高呈现负载**会卡在苹果标（呈现/定时器并发，待重构修复）。
 
 ## 构建链
 
