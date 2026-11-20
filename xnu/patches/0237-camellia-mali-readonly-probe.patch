@@ -1,0 +1,71 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1126,6 +1126,59 @@
+ 	}
+ }
+ 
++
++/* ------------------------------------------------------------------ *
++ * MT6833 Mali state probe (READ ONLY).  Boot arg sweetmaliro=1.
++ * Prints SPM power state, topckgen MFG mux, APMIXED MFGPLL and the
++ * mfgcfg block state so the first write in the real bring-up can be
++ * chosen from evidence instead of guesses.
++ * ------------------------------------------------------------------ */
++static void
++sweet_mali_probe(void)
++{
++	int enabled = 0;
++	vm_offset_t spm, topckgen, apmixed, mfgcfg, infra;
++
++	if (!PE_parse_boot_argn("sweetmaliro", &enabled, sizeof(enabled)) ||
++	    enabled != 1) {
++		return;
++	}
++	spm = ml_io_map(0x10006000u, 0x1000);
++	topckgen = ml_io_map(0x10000000u, 0x1000);
++	apmixed = ml_io_map(0x1000c000u, 0x1000);
++	mfgcfg = ml_io_map(0x13fbf000u, 0x1000);
++	infra = ml_io_map(0x10001000u, 0x1000);
++	if (!spm || !topckgen || !apmixed || !mfgcfg || !infra) {
++		printf("SWEET MALI: map failed spm=%d top=%d ap=%d mfg=%d infra=%d\n",
++		    spm != 0, topckgen != 0, apmixed != 0, mfgcfg != 0, infra != 0);
++		return;
++	}
++	printf("SWEET MALI: SPM 16C=%08x 170=%08x 308=%08x 30C=%08x 310=%08x 314=%08x\n",
++	    *(volatile uint32_t *)(spm + 0x16C),
++	    *(volatile uint32_t *)(spm + 0x170),
++	    *(volatile uint32_t *)(spm + 0x308),
++	    *(volatile uint32_t *)(spm + 0x30C),
++	    *(volatile uint32_t *)(spm + 0x310),
++	    *(volatile uint32_t *)(spm + 0x314));
++	printf("SWEET MALI: TOP CLK_CFG_4 %08x/%08x/%08x INFRA_4C=%08x\n",
++	    *(volatile uint32_t *)(topckgen + 0x50),
++	    *(volatile uint32_t *)(topckgen + 0x54),
++	    *(volatile uint32_t *)(topckgen + 0x58),
++	    *(volatile uint32_t *)(infra + 0x4C));
++	printf("SWEET MALI: APMIXED MFGPLL %08x/%08x/%08x/%08x\n",
++	    *(volatile uint32_t *)(apmixed + 0x268),
++	    *(volatile uint32_t *)(apmixed + 0x26C),
++	    *(volatile uint32_t *)(apmixed + 0x270),
++	    *(volatile uint32_t *)(apmixed + 0x274));
++	printf("SWEET MALI: MFGCFG 20=%08x B0=%08x B4=%08x F60=%08x F64=%08x F68=%08x\n",
++	    *(volatile uint32_t *)(mfgcfg + 0x20),
++	    *(volatile uint32_t *)(mfgcfg + 0xB0),
++	    *(volatile uint32_t *)(mfgcfg + 0xB4),
++	    *(volatile uint32_t *)(mfgcfg + 0xF60),
++	    *(volatile uint32_t *)(mfgcfg + 0xF64),
++	    *(volatile uint32_t *)(mfgcfg + 0xF68));
++}
++
+ void
+ sweet_touch_mtk_init(void)
+ {
+@@ -1137,6 +1190,7 @@
+ 	}
+ 	st.started = true;
+ 	sweet_keys_mtk_poll_init();
++	sweet_mali_probe();
+ 	(void)PE_parse_boot_argn("sweettouchmtk", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		printf("SWEET TOUCH MTK: disabled (sweettouchmtk=0)\n");
