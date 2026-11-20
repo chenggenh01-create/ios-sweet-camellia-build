@@ -1,0 +1,80 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1306,21 +1306,28 @@
+ static bool
+ mali_mfg1_bus(void)
+ {
+-	printf("SWEET MALI: mfg1 way_en 4C=%08x\n", mali_prd(mali_p_infra_pdn, 0x4C));
+-	mali_pwr(mali_p_infra_pdn, 0x4C, 0x1800u);
++	printf("SWEET MALI: mfg1 way_en before 4C=%08x\n", mali_prd(mali_p_infra_pdn, 0x4C));
++	mali_pwr(mali_p_infra_pdn, 0x4C, mali_prd(mali_p_infra_pdn, 0x4C) | 0x1800u);
+ 	if (!mali_wait(mali_p_infra_pdn, 0x4C, 0x1800u, 0x1800u, 500000)) {
+-		printf("SWEET MALI: way_en ack slow 4C=%08x\n", mali_prd(mali_p_infra_pdn, 0x4C));
+-		return false;
+-	}
++		/* v29: the 251 run left 0x4C at 0x101 here, and gating the release on
++		 * it is what kept the GPU AXI port protected (aperture read 0 with all
++		 * four domains powered).  Continue to the PROTECTEN clears anyway. */
++		printf("SWEET MALI: way_en ack slow 4C=%08x (continuing)\n",
++		    mali_prd(mali_p_infra_pdn, 0x4C));
++	}
++	/* The CLR registers read back 0 by design, so print the STA registers the
++	 * release actually shows up in (0x228 STA1, 0x258 STA1_1, 0x724 STA1_2). */
++	printf("SWEET MALI: mfg1 protect before 228=%08x 258=%08x 724=%08x\n",
++	    mali_prd(mali_p_infra, 0x228), mali_prd(mali_p_infra, 0x258),
++	    mali_prd(mali_p_infra, 0x724));
+ 	mali_pwr(mali_p_infra, 0x2A4, (1u << 21) | (1u << 22));
+ 	mali_pwr(mali_p_infra, 0x718, 1u << 7);
+ 	mali_pwr(mali_p_infra, 0x2AC, 1u << 21);
+ 	mali_pwr(mali_p_infra, 0x718, (1u << 5) | (1u << 6));
+-	/* The CLR registers read back 0 by design, so print the STA registers the
+-	 * release actually shows up in (0x228 STA1, 0x258 STA1_1, 0x724 STA1_2). */
+-	printf("SWEET MALI: mfg1 protect STA 228=%08x 258=%08x 724=%08x\n",
++	mali_settle(2000);
++	printf("SWEET MALI: mfg1 protect after 228=%08x 258=%08x 724=%08x 4C=%08x\n",
+ 	    mali_prd(mali_p_infra, 0x228), mali_prd(mali_p_infra, 0x258),
+-	    mali_prd(mali_p_infra, 0x724));
++	    mali_prd(mali_p_infra, 0x724), mali_prd(mali_p_infra_pdn, 0x4C));
+ 	return true;
+ }
+ 
+@@ -1348,7 +1355,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v28 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v29 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -1411,7 +1418,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v28");
++		mali_bg3d_gate("v29");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
+@@ -1551,6 +1558,20 @@
+ 	    *(volatile uint32_t *)(mfgcfg + 0xF60),
+ 	    *(volatile uint32_t *)(mfgcfg + 0xF64),
+ 	    *(volatile uint32_t *)(mfgcfg + 0xF68));
++	/* v29: the CG gate state and the bus-protect state were only printed once,
++	 * early enough to scroll away before a photo could be taken.  They repeat
++	 * here so one picture of the steady state is enough to judge a run. */
++	printf("SWEET MALI: MFGCG 000=%08x 004=%08x 008=%08x\n",
++	    *(volatile uint32_t *)(mfgcfg + 0x000),
++	    *(volatile uint32_t *)(mfgcfg + 0x004),
++	    *(volatile uint32_t *)(mfgcfg + 0x008));
++	printf("SWEET MALI: PWR 31C=%08x 4C=%08x 228=%08x 258=%08x 724=%08x MISC=%08x\n",
++	    *(volatile uint32_t *)(spm + 0x31C),
++	    *(volatile uint32_t *)(mali_probe_infra_pdn + 0x4C),
++	    *(volatile uint32_t *)(infra + 0x228),
++	    *(volatile uint32_t *)(infra + 0x258),
++	    *(volatile uint32_t *)(infra + 0x724),
++	    *(volatile uint32_t *)(infra + 0x600));
+ }
+ 
+ static void
