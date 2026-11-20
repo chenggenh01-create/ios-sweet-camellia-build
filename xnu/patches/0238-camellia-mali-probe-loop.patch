@@ -1,0 +1,78 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1133,16 +1133,32 @@
+  * mfgcfg block state so the first write in the real bring-up can be
+  * chosen from evidence instead of guesses.
+  * ------------------------------------------------------------------ */
+-static void
+-sweet_mali_probe(void)
+-{
+-	int enabled = 0;
+-	vm_offset_t spm, topckgen, apmixed, mfgcfg, infra;
+-
+-	if (!PE_parse_boot_argn("sweetmaliro", &enabled, sizeof(enabled)) ||
+-	    enabled != 1) {
+-		return;
+-	}
++
++static void sweet_mali_probe_loop(void);
++
++static int mali_probe_chan;
++
++static void
++mali_probe_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t deadline;
++
++	for (;;) {
++		sweet_mali_probe_loop();
++		clock_interval_to_deadline(10000, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&mali_probe_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++static vm_offset_t mali_spm, mali_topckgen, mali_apmixed, mali_mfgcfg, mali_infra;
++
++static void
++sweet_mali_probe_loop(void)
++{
++	vm_offset_t spm = mali_spm, topckgen = mali_topckgen, apmixed = mali_apmixed;
++	vm_offset_t mfgcfg = mali_mfgcfg, infra = mali_infra;
++
+ 	spm = ml_io_map(0x10006000u, 0x1000);
+ 	topckgen = ml_io_map(0x10000000u, 0x1000);
+ 	apmixed = ml_io_map(0x1000c000u, 0x1000);
+@@ -1179,6 +1195,31 @@
+ 	    *(volatile uint32_t *)(mfgcfg + 0xF68));
+ }
+ 
++static void
++sweet_mali_probe(void)
++{
++	int enabled = 0;
++	thread_t thread;
++
++	if (!PE_parse_boot_argn("sweetmaliro", &enabled, sizeof(enabled)) ||
++	    enabled != 1) {
++		return;
++	}
++	mali_spm = ml_io_map(0x10006000u, 0x1000);
++	mali_topckgen = ml_io_map(0x10000000u, 0x1000);
++	mali_apmixed = ml_io_map(0x1000c000u, 0x1000);
++	mali_mfgcfg = ml_io_map(0x13fbf000u, 0x1000);
++	mali_infra = ml_io_map(0x10001000u, 0x1000);
++	if (!mali_spm || !mali_topckgen || !mali_apmixed || !mali_mfgcfg || !mali_infra) {
++		printf("SWEET MALI: map failed\n");
++		return;
++	}
++	sweet_mali_probe_loop();
++	if (kernel_thread_start(mali_probe_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
+ void
+ sweet_touch_mtk_init(void)
+ {
