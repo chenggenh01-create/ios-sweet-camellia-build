@@ -1,0 +1,217 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1217,6 +1217,125 @@
+ 	return true;
+ }
+ 
++/*
++ * v27: the SRAM release and the power-on are kept apart, because the two
++ * references disagree about the order.  The vendor bus-protect step releases
++ * the SRAM before powering the domain (clk-mt6833-pg.c,
++ * spm_mtcmos_ctrl_mfg1_bus_prot), while redwood_mali.c powers the domain and
++ * releases the SRAM afterwards.  MFG1 is tried both ways in one boot, so a
++ * single flash answers which one this part wants.
++ */
++#define MALI_SPM_PWR_STATUS     0x16Cu
++#define MALI_SPM_PWR_STATUS_2ND 0x170u
++#define MALI_SPM_PWR_RST_B      (1u << 0)
++#define MALI_SPM_PWR_ISO        (1u << 1)
++#define MALI_SPM_PWR_ON         (1u << 2)
++#define MALI_SPM_PWR_ON_2ND     (1u << 3)
++#define MALI_SPM_PWR_CLK_DIS    (1u << 4)
++#define MALI_SPM_SRAM_PDN       (1u << 8)
++#define MALI_SPM_SRAM_ACK       (1u << 12)
++#define MALI_MFG1_CON           0x30Cu
++#define MALI_MFG1_STA           (1u << 3)
++#define MALI_MFG_MISC_CON       0x600u   /* INFRACFG_AO + 0x600, bit19 = MFG_DFD_TRIGGER */
++
++static void
++mali_settle(int n)
++{
++	for (volatile int i = 0; i < n; i++) {
++		__asm__ volatile("nop");
++	}
++}
++
++static bool
++mali_sram_release(uint32_t con, int loops)
++{
++	mali_pwr(mali_p_spm, con, mali_prd(mali_p_spm, con) & ~MALI_SPM_SRAM_PDN);
++	return mali_wait(mali_p_spm, con, MALI_SPM_SRAM_ACK, 0, loops);
++}
++
++static bool
++mali_pwr_on(uint32_t con, uint32_t stabits, int loops)
++{
++	mali_pwr(mali_p_spm, con, mali_prd(mali_p_spm, con) | MALI_SPM_PWR_ON);
++	mali_pwr(mali_p_spm, con, mali_prd(mali_p_spm, con) | MALI_SPM_PWR_ON_2ND);
++	if (!mali_wait(mali_p_spm, MALI_SPM_PWR_STATUS, stabits, stabits, loops) ||
++	    !mali_wait(mali_p_spm, MALI_SPM_PWR_STATUS_2ND, stabits, stabits, loops)) {
++		return false;
++	}
++	mali_pwr(mali_p_spm, con, mali_prd(mali_p_spm, con) & ~MALI_SPM_PWR_CLK_DIS);
++	mali_pwr(mali_p_spm, con, mali_prd(mali_p_spm, con) & ~MALI_SPM_PWR_ISO);
++	mali_pwr(mali_p_spm, con, mali_prd(mali_p_spm, con) | MALI_SPM_PWR_RST_B);
++	return true;
++}
++
++/*
++ * Open the BG3D clock gate: the step v26 never did.  redwood_mali.c:540 writes
++ * 1 into mfgcfg+0x008 with the note "MFG_CG_CLR: BG3D runs", and MTK lays a CG
++ * block out as CON/SET/CLR at 0x0/0x4/0x8, so the write should clear bit0 of
++ * the CON register.  The MT6833 mfgcfg base is 0x13fbf000, not MT6768's
++ * 0x13000000, and this reference is a different SoC, so both registers are
++ * read back instead of assuming the gate really opened.
++ */
++static bool
++mali_bg3d_gate(const char *tag)
++{
++	uint32_t con, clr;
++
++	con = mali_prd(mali_p_mfgcfg, 0x000);
++	clr = mali_prd(mali_p_mfgcfg, 0x008);
++	printf("SWEET MALI: bg3d %s CG_CON=%08x CG_CLR=%08x\n", tag, con, clr);
++	mali_pwr(mali_p_mfgcfg, 0x008, 1u);
++	mali_settle(2000);
++	con = mali_prd(mali_p_mfgcfg, 0x000);
++	printf("SWEET MALI: bg3d %s after CG_CON=%08x CG_CLR=%08x bit0=%d\n", tag, con,
++	    mali_prd(mali_p_mfgcfg, 0x008), con & 1u);
++	return (con & 1u) == 0;
++}
++
++static void
++mali_mfg1_bus_release(void)
++{
++	mali_pwr(mali_p_infra_pdn, 0x4C, 0x1800u);       /* way_en on */
++	if (!mali_wait(mali_p_infra_pdn, 0x4C, 0x1800u, 0x1800u, 500000)) {
++		printf("SWEET MALI: way_en ack slow 4C=%08x\n", mali_prd(mali_p_infra_pdn, 0x4C));
++	}
++	mali_pwr(mali_p_infra, 0x2A4, (1u << 21) | (1u << 22));
++	mali_pwr(mali_p_infra, 0x718, 1u << 7);
++	mali_pwr(mali_p_infra, 0x2AC, 1u << 21);
++	mali_pwr(mali_p_infra, 0x718, (1u << 5) | (1u << 6));
++	printf("SWEET MALI: mfg1 protect 4C=%08x 2A4=%08x 2AC=%08x 718=%08x\n",
++	    mali_prd(mali_p_infra_pdn, 0x4C), mali_prd(mali_p_infra, 0x2A4),
++	    mali_prd(mali_p_infra, 0x2AC), mali_prd(mali_p_infra, 0x718));
++}
++
++static bool
++mali_mfg1_try(const char *tag, bool sram_first)
++{
++	bool sram = false, pwr;
++
++	printf("SWEET MALI: MFG1 %s sram_first=%d con=%08x 16C=%08x\n", tag, sram_first ? 1 : 0,
++	    mali_prd(mali_p_spm, MALI_MFG1_CON), mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS));
++	if (sram_first) {
++		sram = mali_sram_release(MALI_MFG1_CON, 500000);
++		printf("SWEET MALI: MFG1 %s sram ok=%d con=%08x\n", tag, sram ? 1 : 0,
++		    mali_prd(mali_p_spm, MALI_MFG1_CON));
++	}
++	mali_mfg1_bus_release();
++	pwr = mali_pwr_on(MALI_MFG1_CON, MALI_MFG1_STA, 500000);
++	printf("SWEET MALI: MFG1 %s pwr ok=%d con=%08x 16C=%08x 170=%08x\n", tag, pwr ? 1 : 0,
++	    mali_prd(mali_p_spm, MALI_MFG1_CON), mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
++	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
++	if (!pwr) {
++		return false;
++	}
++	if (!sram_first) {
++		sram = mali_sram_release(MALI_MFG1_CON, 500000);
++		printf("SWEET MALI: MFG1 %s sram(after pwr) ok=%d con=%08x\n", tag, sram ? 1 : 0,
++		    mali_prd(mali_p_spm, MALI_MFG1_CON));
++	}
++	return sram;
++}
++
+ static void
+ sweet_mali_power(void)
+ {
+@@ -1236,31 +1355,38 @@
+ 		printf("SWEET MALI: power map failed\n");
+ 		return;
+ 	}
+-	printf("SWEET MALI: power-on start (status %08x)\n", mali_prd(mali_p_spm, 0x16C));
++	printf("SWEET MALI: v27 power-on start 16C=%08x 170=%08x\n",
++	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
++	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
++	/* 0) DFD lock is read only on purpose: the vendor's pg_prepare still walks
++	 *    enable_subsys when DFD is triggered, so clearing bit19 here would
++	 *    change state we do not understand yet.  Just record it. */
++	{
++		uint32_t misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
++		printf("SWEET MALI: MFG_MISC_CON=%08x dfd_bit19=%d\n", misc, (misc >> 19) & 1u);
++	}
++	/* 1) pre-clk: open the BG3D gate, the step v26 never did. */
++	printf("SWEET MALI: bg3d gate on\n");
++	(void)mali_bg3d_gate("pre");
+ 
+ 	printf("SWEET MALI: MFG0 on\n");
+ 	if (!mali_spm_on(0x308, 1u << 2)) {
+ 		goto fail;
+ 	}
+-	printf("SWEET MALI: MFG0 ok, MFG1 bus release\n");
+-	/* MFG1 bus protection release: SRAM first, then way_en and steps. */
+-	mali_pwr(mali_p_spm, 0x30C, mali_prd(mali_p_spm, 0x30C) & ~(1u << 8));
+-	if (!mali_wait(mali_p_spm, 0x30C, 1u << 12, 0, 5000000)) {
+-		printf("SWEET MALI: MFG1 SRAM ack timeout con=%08x\n", mali_prd(mali_p_spm, 0x30C));
+-		goto fail;
+-	}
+-	mali_pwr(mali_p_infra_pdn, 0x4C, 0x1800u);       /* way_en on */
+-	if (!mali_wait(mali_p_infra_pdn, 0x4C, 0x1800u, 0x1800u, 5000000)) {
+-		printf("SWEET MALI: way_en ack timeout 4C=%08x\n", mali_prd(mali_p_infra_pdn, 0x4C));
+-	}
+-	mali_pwr(mali_p_infra, 0x2A4, (1u << 21) | (1u << 22));
+-	mali_pwr(mali_p_infra, 0x718, 1u << 7);
+-	mali_pwr(mali_p_infra, 0x2AC, 1u << 21);
+-	mali_pwr(mali_p_infra, 0x718, (1u << 5) | (1u << 6));
+-	printf("SWEET MALI: MFG1 on\n");
+-	if (!mali_spm_on(0x30C, 1u << 3)) {
+-		goto fail;
+-	}
++	printf("SWEET MALI: MFG0 ok, MFG1 try A (vendor: sram, bus, pwr)\n");
++	if (!mali_mfg1_try("A", true)) {
++		printf("SWEET MALI: MFG1 A failed, bg3d again then try B (redwood: bus, pwr, sram)\n");
++		(void)mali_bg3d_gate("retry");
++		if (!mali_mfg1_try("B", false)) {
++			printf("SWEET MALI: MFG1 both orders failed con=%08x 16C=%08x\n",
++			    mali_prd(mali_p_spm, MALI_MFG1_CON),
++			    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS));
++			goto fail;
++		}
++	}
++	printf("SWEET MALI: MFG1 up, con=%08x 16C=%08x\n",
++	    mali_prd(mali_p_spm, MALI_MFG1_CON), mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS));
++
+ 	printf("SWEET MALI: MFG2 on\n");
+ 	if (!mali_spm_on(0x310, 1u << 4)) {
+ 		goto fail;
+@@ -1282,12 +1408,28 @@
+ 	printf("SWEET MALI: mfgcfg 20=%08x B0=%08x B4=%08x F60=%08x\n",
+ 	    mali_prd(mali_p_mfgcfg, 0x20), mali_prd(mali_p_mfgcfg, 0xB0),
+ 	    mali_prd(mali_p_mfgcfg, 0xB4), mali_prd(mali_p_mfgcfg, 0xF60));
++	/* Vendor mfgcfg timing (mtk_gpufreq_plat.c): the I2M protector is armed in
++	 * two steps with a settle in between, the last write leaving bit0 set. */
++	mali_pwr(mali_p_mfgcfg, 0xF60, 0x20700316u);
++	mali_pwr(mali_p_mfgcfg, 0xF64, 0x1000000Cu);
++	mali_pwr(mali_p_mfgcfg, 0xF68, 0x01010802u);
++	mali_settle(20000);
++	mali_pwr(mali_p_mfgcfg, 0xF60, 0x20700317u);
++	printf("SWEET MALI: mfgcfg timing F60=%08x F64=%08x F68=%08x\n",
++	    mali_prd(mali_p_mfgcfg, 0xF60), mali_prd(mali_p_mfgcfg, 0xF64),
++	    mali_prd(mali_p_mfgcfg, 0xF68));
+ 
+ 	printf("SWEET MALI: read GPU_ID\n");
+ 	id = mali_prd(mali_p_gpu, 0x000);
+ 	printf("SWEET MALI: GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n", id,
+ 	    mali_prd(mali_p_gpu, 0x100), mali_prd(mali_p_gpu, 0x110),
+ 	    mali_prd(mali_p_gpu, 0x120));
++	if (id == 0u || id == 0xffffffffu) {
++		/* A dead ID means the block is not really powered; poking reset and
++		 * core power into it would only make the log harder to read. */
++		printf("SWEET MALI: GPU_ID dead, skip reset and core power\n");
++		return;
++	}
+ 	printf("SWEET MALI: GPU soft reset\n");
+ 	mali_pwr(mali_p_gpu, 0x028, 0);            /* GPU_INT_MASK */
+ 	mali_pwr(mali_p_gpu, 0x024, 0xffffffffu); /* GPU_INT_CLEAR */
