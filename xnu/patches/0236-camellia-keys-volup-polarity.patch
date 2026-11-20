@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -951,7 +951,7 @@
+  *
+  *   volume down  KPD KP_MEM1 bit 0 (vendor DT kpd-hw-init-map[0]=0x72)
+  *   volume up    KPD KP_MEM2 bit 1 (vendor DT kpd-hw-rstkey=0x11),
+- *                or MT6359 TOPSTATUS bit 3 (HOMEKEY_DEB, 0 = down)
++ *                or MT6359 TOPSTATUS bit 3 (HOMEKEY_DEB, 1 = down; confirmed on device)
+  *   power        MT6359 TOPSTATUS bit 1 (PWRKEY_DEB, 0 = down)
+  *
+  * PMIC reads go through the PMIC wrapper (read only).  Boot arg
+@@ -1071,10 +1071,10 @@
+ 			mem2 = key_rd16(key_kpd, KEY_KPD_MEM2);
+ 		}
+ 		now[KEY_POWER] = pmic_ok ? !(top & KEY_TOP_PWRKEY_DEB) : key_down[KEY_POWER];
+-		now[KEY_VOLUME_UP] = key_kpd && !(mem2 & 2u);
+-		if (!now[KEY_VOLUME_UP] && pmic_ok) {
+-			now[KEY_VOLUME_UP] = !(top & KEY_TOP_HOMEKEY_DEB);
+-		}
++		/* KPD bits are active low; MT6359 HOMEKEY_DEB is active HIGH
++		 * (idle TOPSTATUS 0x86, pressed 0x8e - bit 3 set). */
++		now[KEY_VOLUME_UP] = (key_kpd && !(mem2 & 2u)) ||
++		    (pmic_ok && (top & KEY_TOP_HOMEKEY_DEB) != 0);
+ 		now[KEY_VOLUME_DOWN] = key_kpd && !(mem1 & 1u);
+ 		for (unsigned i = 0; i < 3; i++) {
+ 			if (now[i] == key_seen[i] && now[i] != key_down[i]) {
