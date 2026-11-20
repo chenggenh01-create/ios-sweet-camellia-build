@@ -1,0 +1,40 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1136,6 +1136,8 @@
+ 
+ static void sweet_mali_probe_loop(void);
+ 
++static void sweet_mali_power_status(void);
++
+ static int mali_probe_chan;
+ 
+ static void
+@@ -1145,6 +1147,7 @@
+ 
+ 	for (;;) {
+ 		sweet_mali_probe_loop();
++		sweet_mali_power_status();
+ 		clock_interval_to_deadline(10000, NSEC_PER_MSEC, &deadline);
+ 		(void)assert_wait_deadline(&mali_probe_chan, THREAD_UNINT, deadline);
+ 		thread_block(THREAD_CONTINUE_NULL);
+@@ -1285,6 +1288,19 @@
+ 
+ fail:
+ 	printf("SWEET MALI: power-on failed, status %08x\n", mali_prd(mali_p_spm, 0x16C));
++}
++
++static void
++sweet_mali_power_status(void)
++{
++	if (!mali_p_spm || !mali_p_gpu) {
++		return;
++	}
++	printf("SWEET MALI: status SPM=%08x/%08x MFGCFG20=%08x GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n",
++	    mali_prd(mali_p_spm, 0x16C), mali_prd(mali_p_spm, 0x170),
++	    mali_p_mfgcfg ? mali_prd(mali_p_mfgcfg, 0x20) : 0,
++	    mali_prd(mali_p_gpu, 0x000), mali_prd(mali_p_gpu, 0x100),
++	    mali_prd(mali_p_gpu, 0x110), mali_prd(mali_p_gpu, 0x120));
+ }
+ 
+ static vm_offset_t mali_spm, mali_topckgen, mali_apmixed, mali_mfgcfg, mali_infra;
