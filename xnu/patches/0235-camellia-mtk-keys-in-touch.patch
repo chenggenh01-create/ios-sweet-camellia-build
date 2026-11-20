@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 --- a/bsd/dev/sweet_touch_mtk.c
 +++ b/bsd/dev/sweet_touch_mtk.c
-@@ -943,6 +943,182 @@
+@@ -943,6 +943,189 @@
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -36,7 +36,8 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +#define KEY_SWINF_INIT    (1u << 15)
 +#define KEY_MT6359_TOPSTATUS  0x002au
 +#define KEY_TOP_PWRKEY_DEB    (1u << 1)
-+#define KEY_TOP_HOMEKEY_DEB   (1u << 3)
++#define KEY_TOP_HOMEKEY_DEB   (1u << 2)   /* volume down, active low */
++#define KEY_TOP_VOLUP_DEB     (1u << 3)   /* volume up, active high */
 +#define KEY_POLL_MS       20
 +#define KEY_POWER         0
 +#define KEY_VOLUME_UP     1
@@ -133,11 +134,17 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +			mem2 = key_rd16(key_kpd, KEY_KPD_MEM2);
 +		}
 +		now[KEY_POWER] = pmic_ok ? !(top & KEY_TOP_PWRKEY_DEB) : key_down[KEY_POWER];
-+		/* KPD bits are active low; MT6359 HOMEKEY_DEB is active HIGH
-+		 * (idle TOPSTATUS 0x86, pressed 0x8e - bit 3 set). */
-+		now[KEY_VOLUME_UP] = (key_kpd && !(mem2 & 2u)) ||
-+		    (pmic_ok && (top & KEY_TOP_HOMEKEY_DEB) != 0);
-+		now[KEY_VOLUME_DOWN] = key_kpd && !(mem1 & 1u);
++		/* MT6359 TOPSTATUS on this board (observed):
++		 *   0x86 idle, 0x8a volume down (bit2 cleared), 0x8e volume up
++		 *   (bit3 set) - volume down also raises bit3, so bit2 must win.
++		 * KPD bits stay as an additional fallback (active low). */
++		{
++			bool home_down = pmic_ok && !(top & KEY_TOP_HOMEKEY_DEB);
++			bool volup = pmic_ok && (top & KEY_TOP_VOLUP_DEB) && !home_down;
++
++			now[KEY_VOLUME_UP] = volup || (key_kpd && !(mem2 & 2u));
++			now[KEY_VOLUME_DOWN] = home_down || (key_kpd && !(mem1 & 1u));
++		}
 +		for (unsigned i = 0; i < 3; i++) {
 +			if (now[i] == key_seen[i] && now[i] != key_down[i]) {
 +				key_report(i, now[i], mem1, mem2, top);
@@ -170,7 +177,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	key_kpd = ml_io_map(KEY_KPD_PA, KEY_PWRAP_SIZE);
 +	key_pwrap = ml_io_map(KEY_PWRAP_PA, KEY_PWRAP_SIZE);
 +	pmic_ok = key_pmic_read(KEY_MT6359_TOPSTATUS, &top);
-+	printf("SWEET KEYS MTK: start v2 kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x mem2=%04x\n",
++	printf("SWEET KEYS MTK: start v3 kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x mem2=%04x\n",
 +	    key_kpd != 0, key_pwrap != 0, pmic_ok, top,
 +	    key_kpd ? key_rd16(key_kpd, KEY_KPD_MEM1) : 0xffffu,
 +	    key_kpd ? key_rd16(key_kpd, KEY_KPD_MEM2) : 0xffffu);
@@ -184,7 +191,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  void
  sweet_touch_mtk_init(void)
  {
-@@ -953,6 +1129,7 @@
+@@ -953,6 +1136,7 @@
  		return;
  	}
  	st.started = true;
