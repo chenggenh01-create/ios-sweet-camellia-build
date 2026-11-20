@@ -127,11 +127,12 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  static void
  sweet_mali_power(void)
  {
-@@ -1236,31 +1355,38 @@
+@@ -1236,31 +1355,40 @@
  		printf("SWEET MALI: power map failed\n");
  		return;
  	}
 -	printf("SWEET MALI: power-on start (status %08x)\n", mali_prd(mali_p_spm, 0x16C));
+-
 +	printf("SWEET MALI: v27 power-on start 16C=%08x 170=%08x\n",
 +	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
 +	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
@@ -142,10 +143,6 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +		uint32_t misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
 +		printf("SWEET MALI: MFG_MISC_CON=%08x dfd_bit19=%d\n", misc, (misc >> 19) & 1u);
 +	}
-+	/* 1) pre-clk: open the BG3D gate, the step v26 never did. */
-+	printf("SWEET MALI: bg3d gate on\n");
-+	(void)mali_bg3d_gate("pre");
- 
  	printf("SWEET MALI: MFG0 on\n");
  	if (!mali_spm_on(0x308, 1u << 2)) {
  		goto fail;
@@ -169,7 +166,13 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 -	if (!mali_spm_on(0x30C, 1u << 3)) {
 -		goto fail;
 -	}
-+	printf("SWEET MALI: MFG0 ok, MFG1 try A (vendor: sram, bus, pwr)\n");
++	/* 1) pre-clk: the BG3D gate lives in the MFG0 domain (mfgcfg), so it is
++	 *    opened only once MFG0 is up.  A write into a domain that is still
++	 *    unpowered is dropped at best, and then MFG1 would fail for a reason
++	 *    the log cannot tell apart from a wrong gate offset. */
++	printf("SWEET MALI: MFG0 ok, bg3d gate on\n");
++	(void)mali_bg3d_gate("pre");
++	printf("SWEET MALI: MFG1 try A (vendor: sram, bus, pwr)\n");
 +	if (!mali_mfg1_try("A", true)) {
 +		printf("SWEET MALI: MFG1 A failed, bg3d again then try B (redwood: bus, pwr, sram)\n");
 +		(void)mali_bg3d_gate("retry");
@@ -186,7 +189,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	printf("SWEET MALI: MFG2 on\n");
  	if (!mali_spm_on(0x310, 1u << 4)) {
  		goto fail;
-@@ -1282,12 +1408,28 @@
+@@ -1282,12 +1410,28 @@
  	printf("SWEET MALI: mfgcfg 20=%08x B0=%08x B4=%08x F60=%08x\n",
  	    mali_prd(mali_p_mfgcfg, 0x20), mali_prd(mali_p_mfgcfg, 0xB0),
  	    mali_prd(mali_p_mfgcfg, 0xB4), mali_prd(mali_p_mfgcfg, 0xF60));
