@@ -1,0 +1,194 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -943,6 +943,182 @@
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++
++/* ------------------------------------------------------------------ *
++ * MTK/MT6359 polled keys (same file on purpose: sweet_touch_mtk.c is
++ * created by this patch series, so no bsd/conf/files or sweet_ufs.c
++ * context is needed).
++ *
++ *   volume down  KPD KP_MEM1 bit 0 (vendor DT kpd-hw-init-map[0]=0x72)
++ *   volume up    KPD KP_MEM2 bit 1 (vendor DT kpd-hw-rstkey=0x11),
++ *                or MT6359 TOPSTATUS bit 3 (HOMEKEY_DEB, 0 = down)
++ *   power        MT6359 TOPSTATUS bit 1 (PWRKEY_DEB, 0 = down)
++ *
++ * PMIC reads go through the PMIC wrapper (read only).  Boot arg
++ * sweetkeysmtk=1 enables it.
++ * ------------------------------------------------------------------ */
++extern void sweet_hid_key(int key, int down);
++
++#define KEY_KPD_PA        0x10010000u
++#define KEY_KPD_MEM1      0x0004u
++#define KEY_KPD_MEM2      0x0008u
++#define KEY_PWRAP_PA      0x10026000u
++#define KEY_PWRAP_SIZE    0x1000u
++#define KEY_PWRAP_ACC     0x0880u
++#define KEY_PWRAP_RDATA   0x0894u
++#define KEY_PWRAP_VLDCLR  0x08a4u
++#define KEY_PWRAP_STA     0x08a8u
++#define KEY_SWINF_FSM(v)  (((v) >> 1) & 7u)
++#define KEY_SWINF_IDLE    0u
++#define KEY_SWINF_VLDCLR  6u
++#define KEY_SWINF_INIT    (1u << 15)
++#define KEY_MT6359_TOPSTATUS  0x002au
++#define KEY_TOP_PWRKEY_DEB    (1u << 1)
++#define KEY_TOP_HOMEKEY_DEB   (1u << 3)
++#define KEY_POLL_MS       20
++#define KEY_POWER         0
++#define KEY_VOLUME_UP     1
++#define KEY_VOLUME_DOWN   2
++
++static vm_offset_t key_kpd, key_pwrap;
++static bool key_started;
++static int key_chan;
++static bool key_down[3], key_seen[3];
++
++static inline uint32_t
++key_rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline uint16_t
++key_rd16(vm_offset_t base, uint32_t off)
++{
++	uint16_t v = *(volatile uint16_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++key_wr32(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static bool
++key_pwrap_wait(uint32_t fsm)
++{
++	for (uint32_t i = 0; i < 10000; i++) {
++		if (KEY_SWINF_FSM(key_rd32(key_pwrap, KEY_PWRAP_STA)) == fsm) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static bool
++key_pmic_read(uint16_t reg, uint16_t *val)
++{
++	uint32_t sta, rd;
++
++	if (!key_pwrap) {
++		return false;
++	}
++	sta = key_rd32(key_pwrap, KEY_PWRAP_STA);
++	if (!(sta & KEY_SWINF_INIT)) {
++		return false;
++	}
++	if (!key_pwrap_wait(KEY_SWINF_IDLE)) {
++		return false;
++	}
++	key_wr32(key_pwrap, KEY_PWRAP_ACC, reg);
++	if (!key_pwrap_wait(KEY_SWINF_VLDCLR)) {
++		return false;
++	}
++	rd = key_rd32(key_pwrap, KEY_PWRAP_RDATA);
++	*val = (uint16_t)(rd & 0xffffu);
++	key_wr32(key_pwrap, KEY_PWRAP_VLDCLR, 1);
++	return true;
++}
++
++static void
++key_report(unsigned idx, bool down, uint16_t mem1, uint16_t mem2, uint16_t top)
++{
++	static const char *names[3] = { "power", "volume up", "volume down" };
++
++	key_down[idx] = down;
++	printf("SWEET KEYS MTK: %s %s kpd=%04x/%04x top=%04x\n",
++	    names[idx], down ? "down" : "up", mem1, mem2, top);
++	sweet_hid_key((int)idx, down ? 1 : 0);
++}
++
++static void
++keys_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t deadline;
++
++	for (;;) {
++		uint16_t mem1 = 0xffffu, mem2 = 0xffffu, top = 0xffffu;
++		bool pmic_ok = key_pmic_read(KEY_MT6359_TOPSTATUS, &top);
++		bool now[3];
++
++		if (key_kpd) {
++			mem1 = key_rd16(key_kpd, KEY_KPD_MEM1);
++			mem2 = key_rd16(key_kpd, KEY_KPD_MEM2);
++		}
++		now[KEY_POWER] = pmic_ok ? !(top & KEY_TOP_PWRKEY_DEB) : key_down[KEY_POWER];
++		now[KEY_VOLUME_UP] = key_kpd && !(mem2 & 2u);
++		if (!now[KEY_VOLUME_UP] && pmic_ok) {
++			now[KEY_VOLUME_UP] = !(top & KEY_TOP_HOMEKEY_DEB);
++		}
++		now[KEY_VOLUME_DOWN] = key_kpd && !(mem1 & 1u);
++		for (unsigned i = 0; i < 3; i++) {
++			if (now[i] == key_seen[i] && now[i] != key_down[i]) {
++				key_report(i, now[i], mem1, mem2, top);
++			}
++			key_seen[i] = now[i];
++		}
++		clock_interval_to_deadline(KEY_POLL_MS, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&key_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++static void
++sweet_keys_mtk_poll_init(void)
++{
++	int enabled = 0;
++	thread_t thread;
++	uint16_t top = 0;
++	bool pmic_ok;
++
++	if (key_started) {
++		return;
++	}
++	key_started = true;
++	(void)PE_parse_boot_argn("sweetkeysmtk", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("SWEET KEYS MTK: disabled (sweetkeysmtk=0)\n");
++		return;
++	}
++	key_kpd = ml_io_map(KEY_KPD_PA, KEY_PWRAP_SIZE);
++	key_pwrap = ml_io_map(KEY_PWRAP_PA, KEY_PWRAP_SIZE);
++	pmic_ok = key_pmic_read(KEY_MT6359_TOPSTATUS, &top);
++	printf("SWEET KEYS MTK: start kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x mem2=%04x\n",
++	    key_kpd != 0, key_pwrap != 0, pmic_ok, top,
++	    key_kpd ? key_rd16(key_kpd, KEY_KPD_MEM1) : 0xffffu,
++	    key_kpd ? key_rd16(key_kpd, KEY_KPD_MEM2) : 0xffffu);
++	if (kernel_thread_start(keys_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET KEYS MTK: kernel_thread_start failed\n");
++	}
++}
++
+ void
+ sweet_touch_mtk_init(void)
+ {
+@@ -953,6 +1129,7 @@
+ 		return;
+ 	}
+ 	st.started = true;
++	sweet_keys_mtk_poll_init();
+ 	(void)PE_parse_boot_argn("sweettouchmtk", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		printf("SWEET TOUCH MTK: disabled (sweettouchmtk=0)\n");
