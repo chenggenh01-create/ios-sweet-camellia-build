@@ -1,0 +1,36 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1283,6 +1283,32 @@
+ 	printf("SWEET MALI: GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n", id,
+ 	    mali_prd(mali_p_gpu, 0x100), mali_prd(mali_p_gpu, 0x110),
+ 	    mali_prd(mali_p_gpu, 0x120));
++	printf("SWEET MALI: GPU soft reset\n");
++	mali_pwr(mali_p_gpu, 0x028, 0);            /* GPU_INT_MASK */
++	mali_pwr(mali_p_gpu, 0x024, 0xffffffffu); /* GPU_INT_CLEAR */
++	mali_pwr(mali_p_gpu, 0x030, 1u);           /* GPU_CMD soft reset */
++	if (!mali_wait(mali_p_gpu, 0x020, 1u << 8, 1u << 8, 10000)) {
++		printf("SWEET MALI: reset timeout rawstat=%08x\n", mali_prd(mali_p_gpu, 0x020));
++		return;
++	}
++	mali_pwr(mali_p_gpu, 0x024, 0xffffffffu);
++	printf("SWEET MALI: reset done, powering cores shader=%08x tiler=%08x l2=%08x\n",
++	    mali_prd(mali_p_gpu, 0x100), mali_prd(mali_p_gpu, 0x110),
++	    mali_prd(mali_p_gpu, 0x120));
++	mali_pwr(mali_p_gpu, 0x1a0, mali_prd(mali_p_gpu, 0x120)); /* L2_PWRON */
++	mali_pwr(mali_p_gpu, 0x190, mali_prd(mali_p_gpu, 0x110)); /* TILER_PWRON */
++	mali_pwr(mali_p_gpu, 0x180, mali_prd(mali_p_gpu, 0x100)); /* SHADER_PWRON */
++	if (!mali_wait(mali_p_gpu, 0x160, mali_prd(mali_p_gpu, 0x120), mali_prd(mali_p_gpu, 0x120), 5000) ||
++	    !mali_wait(mali_p_gpu, 0x150, mali_prd(mali_p_gpu, 0x110), mali_prd(mali_p_gpu, 0x110), 5000) ||
++	    !mali_wait(mali_p_gpu, 0x140, mali_prd(mali_p_gpu, 0x100), mali_prd(mali_p_gpu, 0x100), 5000)) {
++		printf("SWEET MALI: core ready timeout %08x/%08x/%08x\n",
++		    mali_prd(mali_p_gpu, 0x140), mali_prd(mali_p_gpu, 0x150),
++		    mali_prd(mali_p_gpu, 0x160));
++		return;
++	}
++	printf("SWEET MALI: GPU ready, GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n",
++	    mali_prd(mali_p_gpu, 0x000), mali_prd(mali_p_gpu, 0x140),
++	    mali_prd(mali_p_gpu, 0x150), mali_prd(mali_p_gpu, 0x160));
+ 	printf("SWEET MALI: power-on done\n");
+ 	return;
+ 
