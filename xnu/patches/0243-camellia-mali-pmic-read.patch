@@ -1,0 +1,19 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1327,6 +1327,15 @@
+ 	if (!mali_p_spm || !mali_p_gpu) {
+ 		return;
+ 	}
++	{
++		uint16_t vgpu_con0 = 0, vgpu_dbg1 = 0, vgpu_elr0 = 0, vsram = 0;
++		bool ok1 = key_pmic_read(0x1588, &vgpu_con0);
++		bool ok2 = key_pmic_read(0x15a8, &vgpu_dbg1);
++		bool ok3 = key_pmic_read(0x15ac, &vgpu_elr0);
++		bool ok4 = key_pmic_read(0x1bbc, &vsram);
++		printf("SWEET MALI: PMIC VGPU11 con0=%04x(%d) dbg1=%04x(%d) elr0=%04x(%d) vsram1bbc=%04x(%d)\n",
++		    vgpu_con0, ok1, vgpu_dbg1, ok2, vgpu_elr0, ok3, vsram, ok4);
++	}
+ 	printf("SWEET MALI: status SPM=%08x/%08x MFGCFG20=%08x GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n",
+ 	    mali_prd(mali_p_spm, 0x16C), mali_prd(mali_p_spm, 0x170),
+ 	    mali_p_mfgcfg ? mali_prd(mali_p_mfgcfg, 0x20) : 0,
