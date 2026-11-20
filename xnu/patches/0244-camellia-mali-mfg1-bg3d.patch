@@ -168,7 +168,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  
  	if (!PE_parse_boot_argn("sweetmalion", &enabled, sizeof(enabled)) ||
  	    enabled != 1) {
-@@ -1236,41 +1346,68 @@
+@@ -1236,41 +1346,78 @@
  		printf("SWEET MALI: power map failed\n");
  		return;
  	}
@@ -246,7 +246,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	 * 0 without a fault, so the read stays even on the failed path, but it is
 +	 * announced first so a later abort still points at its cause. */
 +	if (!mfg1_sram) {
-+		printf("SWEET MALI: MFG1 sram down, aperture read may abort\n");
++		printf("SWEET MALI: MFG1 sram down, early aperture read may abort\n");
 +	}
 +	printf("SWEET MALI: GPU_ID early=%08x shader=%08x tiler=%08x l2=%08x\n",
 +	    mali_prd(mali_p_gpu, 0x000), mali_prd(mali_p_gpu, 0x100),
@@ -264,13 +264,23 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +		return;
 +	}
 +	/* The vendor enables the GPU clocks only after the domains: subsys_bg3d
-+	 * (the BG3D gate) first, then the external CG control. */
++	 * (the BG3D gate) first, then the external CG control.  BG3D is skipped
++	 * when MFG1 has no SRAM ack: on that path CLK_DIS and ISO are already at 0,
++	 * so opening the gate would clock a core whose SRAM is still powered down.
++	 * PWR_ISO only isolates signals, it does not hold the clock. */
 +	printf("SWEET MALI: gpu clocks on\n");
-+	mali_bg3d_gate("v28");
++	if (mfg1_sram) {
++		mali_bg3d_gate("v28");
++	} else {
++		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
++	}
++	if (!mfg1_sram) {
++		printf("SWEET MALI: MFG1 sram down, aperture read may abort\n");
++	}
  	printf("SWEET MALI: mfgcfg init at 13fbf000\n");
  	mali_pwr(mali_p_mfgcfg, 0x20, mali_prd(mali_p_mfgcfg, 0x20) |
  	    (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25));
-@@ -1282,12 +1419,28 @@
+@@ -1282,12 +1429,28 @@
  	printf("SWEET MALI: mfgcfg 20=%08x B0=%08x B4=%08x F60=%08x\n",
  	    mali_prd(mali_p_mfgcfg, 0x20), mali_prd(mali_p_mfgcfg, 0xB0),
  	    mali_prd(mali_p_mfgcfg, 0xB4), mali_prd(mali_p_mfgcfg, 0xF60));
@@ -299,7 +309,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	printf("SWEET MALI: GPU soft reset\n");
  	mali_pwr(mali_p_gpu, 0x028, 0);            /* GPU_INT_MASK */
  	mali_pwr(mali_p_gpu, 0x024, 0xffffffffu); /* GPU_INT_CLEAR */
-@@ -1328,13 +1481,16 @@
+@@ -1328,13 +1491,16 @@
  		return;
  	}
  	{
@@ -322,7 +332,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	}
  	printf("SWEET MALI: status SPM=%08x/%08x MFGCFG20=%08x GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n",
  	    mali_prd(mali_p_spm, 0x16C), mali_prd(mali_p_spm, 0x170),
-@@ -1344,6 +1500,7 @@
+@@ -1344,6 +1510,7 @@
  }
  
  static vm_offset_t mali_spm, mali_topckgen, mali_apmixed, mali_mfgcfg, mali_infra;
@@ -330,7 +340,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  
  static void
  sweet_mali_probe_loop(void)
-@@ -1351,11 +1508,10 @@
+@@ -1351,11 +1518,10 @@
  	vm_offset_t spm = mali_spm, topckgen = mali_topckgen, apmixed = mali_apmixed;
  	vm_offset_t mfgcfg = mali_mfgcfg, infra = mali_infra;
  
@@ -346,7 +356,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	if (!spm || !topckgen || !apmixed || !mfgcfg || !infra) {
  		printf("SWEET MALI: map failed spm=%d top=%d ap=%d mfg=%d infra=%d\n",
  		    spm != 0, topckgen != 0, apmixed != 0, mfgcfg != 0, infra != 0);
-@@ -1368,11 +1524,11 @@
+@@ -1368,11 +1534,11 @@
  	    *(volatile uint32_t *)(spm + 0x30C),
  	    *(volatile uint32_t *)(spm + 0x310),
  	    *(volatile uint32_t *)(spm + 0x314));
@@ -360,7 +370,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	printf("SWEET MALI: APMIXED MFGPLL %08x/%08x/%08x/%08x\n",
  	    *(volatile uint32_t *)(apmixed + 0x268),
  	    *(volatile uint32_t *)(apmixed + 0x26C),
-@@ -1402,7 +1558,9 @@
+@@ -1402,7 +1568,9 @@
  	mali_apmixed = ml_io_map(0x1000c000u, 0x1000);
  	mali_mfgcfg = ml_io_map(0x13fbf000u, 0x1000);
  	mali_infra = ml_io_map(0x10001000u, 0x1000);
