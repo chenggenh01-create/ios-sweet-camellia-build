@@ -1,0 +1,39 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1199,14 +1199,14 @@
+ 	(void)bit;
+ 
+ 	mali_pwr(mali_p_spm, con, mali_prd(mali_p_spm, con) & ~(1u << 8));   /* SRAM_PDN=0 */
+-	if (!mali_wait(mali_p_spm, con, 1u << 12, 0, 1000)) {
+-		printf("SWEET MALI: SRAM ack timeout at con %x\n", con);
++	if (!mali_wait(mali_p_spm, con, 1u << 12, 0, 5000000)) {
++		printf("SWEET MALI: SRAM ack timeout con=%x val=%08x spm16C=%08x\n", con, mali_prd(mali_p_spm, con), mali_prd(mali_p_spm, 0x16C));
+ 		return false;
+ 	}
+ 	v = mali_prd(mali_p_spm, con);
+ 	mali_pwr(mali_p_spm, con, v | (1u << 2) | (1u << 3));                /* ON, ON_2ND */
+-	if (!mali_wait(mali_p_spm, 0x16C, stabits, stabits, 2000) ||
+-	    !mali_wait(mali_p_spm, 0x170, stabits, stabits, 2000)) {
++	if (!mali_wait(mali_p_spm, 0x16C, stabits, stabits, 5000000) ||
++	    !mali_wait(mali_p_spm, 0x170, stabits, stabits, 5000000)) {
+ 		printf("SWEET MALI: power ack timeout con %x status %08x/%08x\n", con,
+ 		    mali_prd(mali_p_spm, 0x16C), mali_prd(mali_p_spm, 0x170));
+ 		return false;
+@@ -1245,9 +1245,14 @@
+ 	printf("SWEET MALI: MFG0 ok, MFG1 bus release\n");
+ 	/* MFG1 bus protection release: SRAM first, then way_en and steps. */
+ 	mali_pwr(mali_p_spm, 0x30C, mali_prd(mali_p_spm, 0x30C) & ~(1u << 8));
+-	(void)mali_wait(mali_p_spm, 0x30C, 1u << 12, 0, 1000);
++	if (!mali_wait(mali_p_spm, 0x30C, 1u << 12, 0, 5000000)) {
++		printf("SWEET MALI: MFG1 SRAM ack timeout con=%08x\n", mali_prd(mali_p_spm, 0x30C));
++		goto fail;
++	}
+ 	mali_pwr(mali_p_infra_pdn, 0x4C, 0x1800u);       /* way_en on */
+-	(void)mali_wait(mali_p_infra_pdn, 0x4C, 0x1800u, 0x1800u, 2000);
++	if (!mali_wait(mali_p_infra_pdn, 0x4C, 0x1800u, 0x1800u, 5000000)) {
++		printf("SWEET MALI: way_en ack timeout 4C=%08x\n", mali_prd(mali_p_infra_pdn, 0x4C));
++	}
+ 	mali_pwr(mali_p_infra, 0x2A4, (1u << 21) | (1u << 22));
+ 	mali_pwr(mali_p_infra, 0x718, 1u << 7);
+ 	mali_pwr(mali_p_infra, 0x2AC, 1u << 21);
