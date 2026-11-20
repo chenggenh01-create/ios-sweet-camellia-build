@@ -170,7 +170,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	key_kpd = ml_io_map(KEY_KPD_PA, KEY_PWRAP_SIZE);
 +	key_pwrap = ml_io_map(KEY_PWRAP_PA, KEY_PWRAP_SIZE);
 +	pmic_ok = key_pmic_read(KEY_MT6359_TOPSTATUS, &top);
-+	printf("SWEET KEYS MTK: start kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x mem2=%04x\n",
++	printf("SWEET KEYS MTK: start v2 kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x mem2=%04x\n",
 +	    key_kpd != 0, key_pwrap != 0, pmic_ok, top,
 +	    key_kpd ? key_rd16(key_kpd, KEY_KPD_MEM1) : 0xffffu,
 +	    key_kpd ? key_rd16(key_kpd, KEY_KPD_MEM2) : 0xffffu);
