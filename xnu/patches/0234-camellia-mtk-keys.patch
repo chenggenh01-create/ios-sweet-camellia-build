@@ -1,0 +1,261 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -1,4 +1,4 @@
+-#
++﻿#
+ # Mach Operating System
+ # Copyright (c) 1989 Carnegie-Mellon University
+ # All rights reserved.  The CMU software License Agreement specifies
+@@ -107,6 +107,7 @@
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
++bsd/dev/sweet_keys_mtk.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -1,4 +1,4 @@
+-/*
++﻿/*
+  * SWEET internal UFS root device.
+  *
+  * The Qualcomm UFS host (UFSHCI 2.1) is left enabled with the link up by the
+@@ -86,6 +86,7 @@
+ #endif
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
++extern void sweet_keys_mtk_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ 
+@@ -696,6 +697,7 @@
+ 	sweet_sample_start();
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();
++	sweet_keys_mtk_init();
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
+ 	return 0;
+diff --git a/bsd/dev/sweet_keys_mtk.c b/bsd/dev/sweet_keys_mtk.c
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/bsd/dev/sweet_keys_mtk.c
+@@ -0,0 +1,213 @@
++﻿/*
++ * CAMELLIA (MT6833): the board's buttons, polled.
++ *
++ *   volume down  the SoC keypad controller, KP_MEM1 bit 0 (clear while down)
++ *   volume up    keypad matrix key 17 = KP_MEM2 bit 1 (kpd-hw-rstkey=0x11 in
++ *                the vendor device tree; the kpd driver reports it as 0x73),
++ *                or MT6359 TOPSTATUS bit 3 (HOMEKEY_DEB, clear while down)
++ *   power        MT6359 TOPSTATUS bit 1 (PWRKEY_DEB, clear while down)
++ *
++ * TOPSTATUS is the PMIC's debounced key level.  It is independent of the PSC
++ * interrupt enable (0x910), so this driver never writes the PMIC; the boot
++ * loader has already initialized the wrapper and the key blocks.  A thread
++ * looks every 20 ms and a key has to read the same twice in a row before it is
++ * reported, so contact bounce cannot reach the HID service.
++ *
++ * Boot arg sweetkeysmtk=1.  The legacy sweet_keys.c is the Qualcomm PM6150
++ * path and is left alone.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern void sweet_hid_key(int key, int down);
++void sweet_keys_mtk_init(void);
++
++#define SKM_KPD_PA        0x10010000u
++#define SKM_KPD_MEM1      0x0004u
++#define SKM_KPD_MEM2      0x0008u
++
++#define SKM_PWRAP_PA      0x10026000u
++#define SKM_PWRAP_SIZE    0x1000u
++#define SKM_PWRAP_ACC     0x0880u
++#define SKM_PWRAP_RDATA   0x0894u
++#define SKM_PWRAP_VLDCLR  0x08a4u
++#define SKM_PWRAP_STA     0x08a8u
++
++#define SKM_SWINF_FSM(v)  (((v) >> 1) & 7u)
++#define SKM_SWINF_IDLE    0u
++#define SKM_SWINF_VLDCLR  6u
++#define SKM_SWINF_INIT    (1u << 15)
++
++#define SKM_MT6359_TOPSTATUS  0x002au
++#define SKM_TOP_PWRKEY_DEB    (1u << 1)
++#define SKM_TOP_HOMEKEY_DEB   (1u << 3)
++
++#define SKM_POLL_MS       20
++#define SKM_POWER         0
++#define SKM_VOLUME_UP     1
++#define SKM_VOLUME_DOWN   2
++
++struct skm_key {
++	const char *name;
++	int usage;
++	bool down;
++	bool seen;
++};
++
++static struct skm_key skm_keys[] = {
++	{ "power", SKM_POWER, false, false },
++	{ "volume up", SKM_VOLUME_UP, false, false },
++	{ "volume down", SKM_VOLUME_DOWN, false, false },
++};
++
++static vm_offset_t skm_kpd, skm_pwrap;
++static bool skm_started;
++static int skm_sleep_chan;
++static unsigned skm_errors;
++
++static inline uint32_t
++skm_rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline uint16_t
++skm_rd16(vm_offset_t base, uint32_t off)
++{
++	uint16_t v = *(volatile uint16_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++skm_wr32(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static bool
++skm_pwrap_wait(uint32_t fsm)
++{
++	uint32_t i;
++
++	for (i = 0; i < 10000; i++) {
++		if (SKM_SWINF_FSM(skm_rd32(skm_pwrap, SKM_PWRAP_STA)) == fsm)
++			return true;
++	}
++	return false;
++}
++
++static bool
++skm_pmic_read(uint16_t reg, uint16_t *val)
++{
++	uint32_t sta, rd;
++
++	if (!skm_pwrap)
++		return false;
++	sta = skm_rd32(skm_pwrap, SKM_PWRAP_STA);
++	if (!(sta & SKM_SWINF_INIT))
++		return false;
++	if (!skm_pwrap_wait(SKM_SWINF_IDLE))
++		return false;
++	skm_wr32(skm_pwrap, SKM_PWRAP_ACC, reg);
++	if (!skm_pwrap_wait(SKM_SWINF_VLDCLR))
++		return false;
++	rd = skm_rd32(skm_pwrap, SKM_PWRAP_RDATA);
++	*val = (uint16_t)(rd & 0xffffu);
++	skm_wr32(skm_pwrap, SKM_PWRAP_VLDCLR, 1);
++	return true;
++}
++
++static void
++skm_report(struct skm_key *key, bool down, uint16_t mem1, uint16_t mem2, uint16_t top)
++{
++	key->down = down;
++	printf("SWEET KEYS MTK: %s %s kpd=%04x/%04x top=%04x\n", key->name,
++	    down ? "down" : "up", mem1, mem2, top);
++	sweet_hid_key(key->usage, down);
++}
++
++static void
++skm_thread(void *arg, wait_result_t result)
++{
++	uint64_t deadline;
++	(void)arg;
++	(void)result;
++
++	for (;;) {
++		uint16_t mem1 = 0xffffu, mem2 = 0xffffu, top = 0xffffu;
++		bool pmic_ok = skm_pmic_read(SKM_MT6359_TOPSTATUS, &top);
++		bool now[3];
++
++		if (skm_kpd) {
++			mem1 = skm_rd16(skm_kpd, SKM_KPD_MEM1);
++			mem2 = skm_rd16(skm_kpd, SKM_KPD_MEM2);
++		}
++		now[0] = pmic_ok ? !(top & SKM_TOP_PWRKEY_DEB) : skm_keys[0].down;
++		now[1] = skm_kpd && !(mem2 & 2u);
++		if (!now[1] && pmic_ok)
++			now[1] = !(top & SKM_TOP_HOMEKEY_DEB);
++		now[2] = skm_kpd && !(mem1 & 1u);
++		if (pmic_ok) {
++			skm_errors = 0;
++		} else if ((skm_errors++ % 250u) == 0) {
++			printf("SWEET KEYS MTK: PMIC read failed\n");
++		}
++		for (unsigned i = 0; i < 3; i++) {
++			if (now[i] == skm_keys[i].seen &&
++			    now[i] != skm_keys[i].down)
++				skm_report(&skm_keys[i], now[i], mem1, mem2, top);
++			skm_keys[i].seen = now[i];
++		}
++		clock_interval_to_deadline(SKM_POLL_MS, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&skm_sleep_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++void
++sweet_keys_mtk_init(void)
++{
++	int enabled = 0;
++	thread_t thread;
++	uint16_t top = 0;
++	bool pmic_ok;
++
++	if (skm_started)
++		return;
++	skm_started = true;
++	if (!PE_parse_boot_argn("sweetkeysmtk", &enabled, sizeof(enabled)) ||
++	    enabled != 1) {
++		printf("SWEET KEYS MTK: disabled (sweetkeysmtk=0)\n");
++		return;
++	}
++	skm_kpd = ml_io_map(SKM_KPD_PA, SKM_PWRAP_SIZE);
++	skm_pwrap = ml_io_map(SKM_PWRAP_PA, SKM_PWRAP_SIZE);
++	if (!skm_kpd && !skm_pwrap) {
++		printf("SWEET KEYS MTK: MMIO mapping failed\n");
++		return;
++	}
++	pmic_ok = skm_pmic_read(SKM_MT6359_TOPSTATUS, &top);
++	printf("SWEET KEYS MTK: start kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x mem2=%04x\n",
++	    skm_kpd != 0, skm_pwrap != 0, pmic_ok, top,
++	    skm_kpd ? skm_rd16(skm_kpd, SKM_KPD_MEM1) : 0xffffu,
++	    skm_kpd ? skm_rd16(skm_kpd, SKM_KPD_MEM2) : 0xffffu);
++	if (kernel_thread_start(skm_thread, NULL, &thread) == KERN_SUCCESS)
++		thread_deallocate(thread);
++	else
++		printf("SWEET KEYS MTK: kernel_thread_start failed\n");
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
