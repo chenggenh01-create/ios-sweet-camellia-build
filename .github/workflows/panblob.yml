@@ -26,7 +26,7 @@ jobs:
           ~/venv/bin/pip install -q --upgrade pip
           ~/venv/bin/pip install -q "meson>=1.5" ninja
           echo "$HOME/venv/bin" >> $GITHUB_PATH
-          meson --version && ninja --version
+          ~/venv/bin/meson --version && ~/venv/bin/ninja --version
 
       - name: Fetch Mesa (pinned)
         run: |
