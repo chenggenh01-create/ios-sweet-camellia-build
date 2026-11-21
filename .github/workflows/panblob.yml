@@ -1,11 +1,15 @@
 name: panblob
 
 # Compiles a compute kernel to Mali Valhall (v9, G57) machine code with Mesa's
-# panfrost compiler, on Linux, and uploads the resulting blob.  The XNU kernel
-# then embeds that blob and submits it as a compute job (see xnu.yml).
+# panfrost compiler, on Linux, and uploads the blob.  The XNU kernel embeds that
+# blob and submits it as a compute job (see xnu.yml).
 #
 # Target device: Redmi Note 10 5G, MT6833 (Dimensity 700), Mali-G57 MC2,
 # GPU_ID 0x90930010 -> Valhall v9.  Not Bifrost, not Adreno.
+#
+# The pipeline mirrors what Mesa itself does for panvk's precompiled kernels:
+# OpenCL C --mesa_clc--> library SPIR-V (Linkage, no OpEntryPoint)
+#           --panfrost_compile--> Valhall ISA + shader info.
 
 on:
   workflow_dispatch:
@@ -25,28 +29,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build python3-pip python3-venv python3-mako python3-yaml \
-            python3-ply libdrm-dev pkg-config bison flex zlib1g-dev \
-            libzstd-dev libexpat1-dev libudev-dev libelf-dev cmake clang \
-            glslang-tools spirv-tools \
-            libwayland-dev wayland-protocols \
+            python3-ply pkg-config bison flex zlib1g-dev libzstd-dev \
+            libexpat1-dev libudev-dev libelf-dev cmake \
+            libdrm-dev libwayland-dev wayland-protocols \
             libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev \
             libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev libxcb-shm0-dev \
             libxcb-glx0-dev libxext-dev libxrandr-dev libxxf86vm-dev \
-            libxshmfence-dev libdrm-dev clang-18 llvm-spirv-18 gdb
+            libxshmfence-dev spirv-tools \
+            llvm-18-dev libclang-18-dev libclang-cpp18-dev \
+            libllvmspirvlib-18-dev clang-18
           python3 -m venv ~/venv
           ~/venv/bin/pip install -q --upgrade pip
           ~/venv/bin/pip install -q "meson>=1.5" ninja "mako>=0.8" packaging pyyaml ply setuptools
           echo "$HOME/venv/bin" >> $GITHUB_PATH
           ~/venv/bin/meson --version && ~/venv/bin/ninja --version
-          # Mesa needs bindgen >= 0.71.1 and noble's package is 0.66, so build the
-          # current one from crates.io and put it ahead of /usr/bin.
           cargo install --quiet bindgen-cli
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           export PATH="$HOME/.cargo/bin:$PATH"
           bindgen --version
 
-      # Ubuntu 24.04 ships libdrm 2.4.125 and Mesa 26.3 wants >= 2.4.133, so
-      # build the released tag here and put its .pc files on the search path.
+      # Ubuntu 24.04 ships libdrm 2.4.125 and Mesa 26.3 wants >= 2.4.133.
       - name: Build libdrm (pinned)
         run: |
           git clone --depth 1 --branch libdrm-2.4.134 \
@@ -65,38 +67,17 @@ jobs:
             https://gitlab.freedesktop.org/mesa/mesa.git mesa
           cd mesa && git log -1 --oneline
 
-      # LLVMSPIRVLib (SPIRV-LLVM-Translator) is only needed by Mesa's OpenCL CLC
-      # compiler, which this pipeline does not use; Ubuntu does not package it and
-      # building it from source would have to match the LLVM version exactly.
-      # Making the dependency optional lets the panfrost compiler build on its own.
-      - name: Make LLVMSPIRVLib optional
-        run: |
-          cd mesa
-          sed -i "s/dependency('LLVMSPIRVLib', required : true, version : _llvmspirvlib_version)/dependency('LLVMSPIRVLib', required : false)/" meson.build
-          # Enabling the panfrost tools also turns on Mesa's OpenCL (CLC) build,
-          # which drags in LLVM/clang libraries that have nothing to do with
-          # shader compilation for the G57.  Force those branches off; only the
-          # panfrost compiler is built here.
-          # with_clc pulls in Mesa's in-tree OpenCL compiler, which needs the
-          # LLVM SPIR-V translator stack this pipeline does not use.  Force the
-          # variable off right after the block that computes it.
-          python3 - <<'PY'
-          import io
-          p = 'meson.build'
-          s = io.open(p, encoding='utf-8').read()
-          anchor = 'with_llvm = with_llvm \\\n  .enable_if(with_clc'
-          assert anchor in s, 'anchor for with_clc not found'
-          s = s.replace(anchor, 'with_clc = false\n' + anchor, 1)
-          io.open(p, 'w', encoding='utf-8').write(s)
-          PY
-          grep -n "^with_clc = false" meson.build | head -3
-          grep -n "LLVMSPIRVLib" meson.build | head -3
-
+      # with_clc (Mesa's in-tree OpenCL compiler, used by mesa_clc) is on because
+      # the panfrost tools enable it; that needs LLVMSPIRVLib, which is installed
+      # above.  softpipe keeps with_gfx_compute true so NIR is built for real.
       - name: Configure
         run: |
           cd mesa
           meson setup build \
             -Dtools=panfrost \
+            -Dprecomp-compiler=enabled \
+            -Dmesa-clc=enabled \
+            -Dinstall-mesa-clc=true \
             -Dpanfrost-rust=false \
             -Dbuild-tests=false \
             -Dgallium-drivers=softpipe \
@@ -104,80 +85,54 @@ jobs:
             -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
             -Dplatforms=x11 -Dvideo-codecs= \
             -Dzstd=disabled \
-            2>&1 | tail -20
+            2>&1 | tail -25
 
-      - name: Build panfrost_compile
+      - name: Build mesa_clc and panfrost_compile
         run: |
           mkdir -p diag
           cd mesa
-          ninja -C build src/panfrost/clc/panfrost_compile 2>&1 | tee ../diag/ninja.txt | tail -30
-          ls -l build/src/panfrost/clc/panfrost_compile
-          ./build/src/panfrost/clc/panfrost_compile || true
+          ninja -C build src/compiler/clc/mesa_clc src/panfrost/clc/panfrost_compile \
+            2>&1 | tee ../diag/ninja.txt | tail -25
+          ls -l build/src/compiler/clc/mesa_clc build/src/panfrost/clc/panfrost_compile
 
-      # The run log is ~6 MB and this network keeps dropping it, so keep the
-      # failure reason in a few-KB artifact instead.
+      - name: Compile the copy kernel to v9 machine code
+        run: |
+          mkdir -p diag
+          set -x
+          cat > copy.cl <<'EOF'
+          #include "compiler/libcl/libcl.h"
+
+          KERNEL(64)
+          panlib_copy(global const uint32_t *src, global uint32_t *dst, uint32_t n)
+          {
+             uint32_t i = cl_global_id.x;
+             if (i < n)
+                dst[i] = src[i];
+          }
+          EOF
+          mesa/build/src/compiler/clc/mesa_clc -o copy.spv --depfile copy.d copy.cl -- \
+            -DPAN_ARCH=9 \
+            -Imesa/include -Imesa/src -Imesa/src/compiler/libcl \
+            -cl-std=cl2.0 -D__OPENCL_VERSION__=200 \
+            -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_CLZ -DNDEBUG \
+            2>&1 | tee diag/mesa_clc.txt
+          ls -l copy.spv
+          spirv-dis copy.spv > diag/copy.spv.txt 2>&1 || true
+          grep -E 'OpCapability|OpEntryPoint|LinkageAttributes' diag/copy.spv.txt | head -20 || true
+          mesa/build/src/panfrost/clc/panfrost_compile panlib_shaders 9 copy.spv copy.h copy.c \
+            2>&1 | tee diag/panfrost_compile.txt
+          echo "panfrost_compile exit=$?" | tee -a diag/panfrost_compile.txt
+          wc -c copy.h copy.c
+          head -30 copy.h || true
+
       - name: Collect diagnostics
         if: always()
         run: |
           mkdir -p diag
           if [ -f mesa/build/meson-logs/meson-log.txt ]; then
-            tail -120 mesa/build/meson-logs/meson-log.txt > diag/meson-log-tail.txt
+            tail -80 mesa/build/meson-logs/meson-log.txt > diag/meson-log-tail.txt
           fi
-          grep -n -E "ERROR|error:" mesa/build/meson-logs/meson-log.txt 2>/dev/null | tail -30 > diag/errors.txt || true
           wc -c diag/* || true
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: panblob-diag
-          path: diag/
-          if-no-files-found: warn
-
-      # panfrost_compile only accepts Mesa's private precompiled-kernel format
-      # and crashes on a normal shader, so build a small host tool that calls
-      # pan_shader_compile() directly, and feed it a Vulkan compute shader.
-      - name: Build the ISA tool and compile a copy kernel
-        run: |
-          mkdir -p diag
-          set -x
-          cp ci/pan_isa_dump.c mesa/src/panfrost/clc/pan_isa_dump.c
-          cat >> mesa/src/panfrost/clc/meson.build <<'EOF'
-
-          pan_isa_dump = executable(
-            'pan_isa_dump',
-            ['pan_isa_dump.c'],
-            link_with : [libpanfrost_compiler],
-            include_directories : [inc_include, inc_src, inc_panfrost],
-            dependencies : [idep_vtn, idep_nir, idep_mesautil, libpanfrost_dep],
-          )
-          EOF
-          ninja -C mesa/build src/panfrost/clc/pan_isa_dump 2>&1 | tee diag/isa_tool_build.txt | tail -20
-
-          cat > copy.comp <<'EOF'
-          #version 450
-          #extension GL_EXT_buffer_reference : require
-          layout(local_size_x = 64) in;
-          layout(buffer_reference, std430, buffer_reference_align = 4) buffer Buf {
-            uint data[];
-          };
-          layout(push_constant) uniform PC {
-            Buf src;
-            Buf dst;
-            uint n;
-          } pc;
-          void main()
-          {
-            uint i = gl_GlobalInvocationID.x;
-            if (i < pc.n)
-              pc.dst.data[i] = pc.src.data[i];
-          }
-          EOF
-          glslangValidator -V -S comp --target-env vulkan1.2 copy.comp -o copy.spv 2>&1 | tee diag/glslang.txt
-          ls -l copy.spv
-          mesa/build/src/panfrost/clc/pan_isa_dump 9 copy.spv copy.bin 2>&1 | tee diag/isa_dump.txt
-          echo "isa_dump exit=$?" | tee -a diag/isa_dump.txt
-          ls -l copy.bin || true
-          xxd -l 128 copy.bin > diag/isa_head.txt 2>&1 || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -185,7 +140,8 @@ jobs:
           name: mali-v9-copy-blob
           path: |
             copy.spv
-            copy.bin
-            copy.comp
+            copy.h
+            copy.c
+            copy.d
             diag/
           if-no-files-found: warn
