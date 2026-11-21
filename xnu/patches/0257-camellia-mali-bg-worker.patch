@@ -1,0 +1,149 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1686,7 +1686,7 @@
+ 		printf("SWEET MALI: v35 no job page\n");
+ 		return;
+ 	}
+-	printf("SWEET MALI: v41 fb phys=%08x%08x stride=%u %ux%u, drawing %d px\n",
++	printf("SWEET MALI: v42 fb phys=%08x%08x stride=%u %ux%u, drawing %d px\n",
+ 	    (uint32_t)(fb_base >> 32), (uint32_t)fb_base, fb_stride, fb_w, fb_h,
+ 	    MALI_FB_ROWS * MALI_FB_COLS);
+ 	{
+@@ -1794,6 +1794,79 @@
+ 	kmem_free(kernel_map, jobpage, PAGE_SIZE);
+ }
+ 
++/* ------------------------------------------------------------------ *
++ * v42: the GPU as a working engine, not a demo.
++ *
++ * A kernel thread submits a batch of write-value jobs every five seconds to a
++ * page the GPU reaches directly (identity mode, so no tables are involved),
++ * reads the last result back from memory and keeps counts.  The counters are
++ * printed with the other steady-state lines, so the console shows the GPU
++ * doing work on a live system rather than one boot-time party trick.
++ * ------------------------------------------------------------------ */
++static vm_offset_t mali_bg_page;
++static uint64_t mali_bg_phys;
++static uint32_t mali_bg_shader;
++static unsigned mali_bg_batches, mali_bg_jobs, mali_bg_ok, mali_bg_bad;
++
++static void
++mali_bg_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	for (;;) {
++		uint64_t deadline;
++		unsigned i, done = 0;
++
++		for (i = 0; i < 8; i++) {
++			if (mali_submit_value(mali_bg_page, mali_bg_phys,
++			    mali_bg_phys + MALI_JOB_OFFSET, MALI_JOB_MAGIC, mali_bg_shader)) {
++				done++;
++			}
++			mali_bg_jobs++;
++		}
++		FlushPoC_DcacheRegion(mali_bg_page, PAGE_SIZE);
++		if (*(volatile uint32_t *)(mali_bg_page + MALI_JOB_OFFSET) == MALI_JOB_MAGIC) {
++			mali_bg_ok++;
++		} else {
++			mali_bg_bad++;
++		}
++		if (done == 0) {
++			mali_bg_bad++;          /* nothing completed: keep it visible */
++		}
++		mali_bg_batches++;
++
++		nanoseconds_to_absolutetime(5ull * NSEC_PER_SEC, &deadline);
++		deadline += mach_absolute_time();
++		assert_wait_deadline_with_leeway((event_t)&mali_bg_thread, THREAD_UNINT,
++		    TIMEOUT_URGENCY_SYS_CRITICAL, deadline, 0);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++static void
++mali_bg_start(uint32_t shader_mask)
++{
++	thread_t thread;
++
++	if (mali_bg_page != 0) {
++		return;
++	}
++	if (kmem_alloc(kernel_map, &mali_bg_page, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET MALI: no page for the background worker\n");
++		mali_bg_page = 0;
++		return;
++	}
++	mali_bg_phys = kvtophys(mali_bg_page);
++	mali_bg_shader = shader_mask;
++	mali_as0_update(0, 2);          /* identity: a GPU address is the physical one */
++	printf("SWEET MALI: background GPU worker page=%08x phys=%08x%08x\n",
++	    (uint32_t)mali_bg_page, (uint32_t)(mali_bg_phys >> 32), (uint32_t)mali_bg_phys);
++	if (kernel_thread_start(mali_bg_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET MALI: background worker thread did not start\n");
++	}
++}
++
+ static void
+ mali_first_job(uint32_t shader_mask)
+ {
+@@ -1892,15 +1965,24 @@
+ 		}
+ 	}
+ 
+-	/* v35: let the GPU paint into the panel it is looking at. */
+-	mali_draw_block(shader_mask);
++	/* v42: drawing is off by default (sweetmalidraw=1 turns it back on); the
++	 * point of this build is the GPU running work in the background. */
++	{
++		int draw = 0;
++
++		PE_parse_boot_argn("sweetmalidraw", &draw, sizeof(draw));
++		if (draw == 1) {
++			mali_draw_block(shader_mask);
++		}
++	}
+ 
+ 	/*
+ 	 * Back to identity before freeing: the mappings above are gone and the
+ 	 * table pages stay allocated (three pages, a bounded leak by design).
+ 	 */
+ 	mali_as0_update(0, 2);
+-	printf("SWEET MALI: v41 first job state=%x pt_pages=%u top=%08x%08x\n",
++	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
++	printf("SWEET MALI: v42 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+@@ -1934,7 +2016,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v41 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v42 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -1997,7 +2079,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v41");
++		mali_bg3d_gate("v42");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
+@@ -2092,7 +2174,9 @@
+ 		 * VSRAM_MD ldo (_vgpu-supply / _vsram_gpu-supply), so VGPU11 is not the
+ 		 * GPU rail on this board and the old reads were looking at the wrong
+ 		 * supply the whole time. */
+-		printf("SWEET MALI: PMIC VPROC1 con0=%04x(%d) dbg0=%04x(%d) dbg1=%04x(%d) elr0=%04x(%d)\n",
++		printf("SWEET MALI: BG batches=%u jobs=%u ok=%u bad=%u\n",
++	    mali_bg_batches, mali_bg_jobs, mali_bg_ok, mali_bg_bad);
++	printf("SWEET MALI: PMIC VPROC1 con0=%04x(%d) dbg0=%04x(%d) dbg1=%04x(%d) elr0=%04x(%d)\n",
+ 		    vp1_con, a, vp1_vosel, b, vp1_en, c, vp1_elr, e);
+ 		printf("SWEET MALI: PMIC VSRAM_MD con0=%04x(%d) mon=%04x(%d) vosel1=%04x(%d)\n",
+ 		    vsm_con, f, vsm_en, g, vsm_vosel, h);
