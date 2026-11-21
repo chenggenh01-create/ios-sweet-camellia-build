@@ -54,12 +54,7 @@ jobs:
           # libfirehose_kernel is built arm64e-only; this kernel is plain arm64
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
-          # ccache: build.sh pins CC/CXX to xcrun's clang.  Wrapping them is what
-          # turns the 8-9 minute full rebuild (93% of this run) into "recompile
-          # only the few files a patch touches".  The compiler is still Xcode's.
-          sed -i '' 's|export CC="$(xcrun -find clang)"|export CC="ccache $(xcrun -find clang)"|' dxb/build.sh
-          sed -i '' 's|export CXX="$(xcrun -find clang++)"|export CXX="ccache $(xcrun -find clang++)"|' dxb/build.sh
-          grep -n 'export CC=\|export CXX=' dxb/build.sh
+
           ls dxb/patches | wc -l
           ls dxb/patches | tail -8
 
@@ -74,6 +69,17 @@ jobs:
           sudo xcode-select -s "$XC"
           xcodebuild -version
           ccache --version | head -1
+          # ccache in masquerade mode: xcodebuild spawns CC as ONE path (no shell),
+          # so "ccache clang" cannot work -- a directory of clang/clang++ symlinks
+          # to ccache can.  ccache then finds the real clang by argv[0] on PATH,
+          # which build.sh pins to the Xcode toolchain.
+          mkdir -p "$HOME/ccache-bin"
+          ln -sf "$(command -v ccache)" "$HOME/ccache-bin/clang"
+          ln -sf "$(command -v ccache)" "$HOME/ccache-bin/clang++"
+          sed -i '' "s|export CC=\"\$(xcrun -find clang)\"|export CC=\"$HOME/ccache-bin/clang\"|" dxb/build.sh
+          sed -i '' "s|export CXX=\"\$(xcrun -find clang++)\"|export CXX=\"$HOME/ccache-bin/clang++\"|" dxb/build.sh
+          grep -n 'export CC=\|export CXX=' dxb/build.sh
+          "$HOME/ccache-bin/clang" --version | head -2
           {
             echo "CCACHE_DIR=$HOME/.ccache"
             echo "CCACHE_MAXSIZE=3G"
