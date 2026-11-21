@@ -107,6 +107,19 @@ jobs:
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
         run: bash build.sh
 
+      # Dump the presentation path out of the tree that was actually built, so a
+      # patch against it is written against real context instead of a guess.
+      - name: Dump present()
+        if: always()
+        run: |
+          F=$(find dxb -path '*iokit/Kernel/arm/SweetFramebuffer.cpp' | head -1)
+          echo "file: $F"
+          if [ -n "$F" ]; then
+            echo '-----BEGIN PRESENT-----'
+            sed -n '/^AppleCLCD::present(/,/^}$/p' "$F"
+            echo '-----END PRESENT-----'
+          fi
+
       - name: ccache stats
         if: always()
         run: ccache -s || true
