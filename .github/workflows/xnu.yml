@@ -109,16 +109,25 @@ jobs:
 
       # Dump the presentation path out of the tree that was actually built, so a
       # patch against it is written against real context instead of a guess.
+      # The same dump as a tiny artifact (a few KB), so it can be fetched without
+      # downloading the 6 MB job log.
       - name: Dump present()
         if: always()
         run: |
+          mkdir -p dump
           F=$(find dxb -path '*iokit/Kernel/arm/SweetFramebuffer.cpp' | head -1)
           echo "file: $F"
           if [ -n "$F" ]; then
-            echo '-----BEGIN PRESENT-----'
-            sed -n '/^AppleCLCD::present(/,/^}$/p' "$F"
-            echo '-----END PRESENT-----'
+            sed -n '/^AppleCLCD::present(/,/^}$/p' "$F" > dump/present.txt
           fi
+          wc -l dump/present.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: present-txt
+          path: dump/present.txt
+          if-no-files-found: warn
 
       - name: ccache stats
         if: always()
