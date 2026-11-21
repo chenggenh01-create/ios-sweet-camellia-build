@@ -1,15 +1,7 @@
 diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 --- a/bsd/dev/sweet_touch_mtk.c
 +++ b/bsd/dev/sweet_touch_mtk.c
-@@ -34,6 +34,7 @@
- #include <machine/machine_routines.h>
- #include <pexpert/pexpert.h>
- #include <vm/vm_kern.h>
-+#include <vm/pmap.h>
- 
- #if defined(ARM64_BOARD_CONFIG_SWEET)
- 
-@@ -1602,6 +1603,125 @@
+@@ -1602,6 +1602,126 @@
  	return true;
  }
  
@@ -69,18 +61,19 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +		fb_phys[i] = 0;
 +	}
 +
-+	{
-+		vm_offset_t va = (vm_offset_t)PE_state.video.v_baseAddr;
-+		uint64_t pa = 0;
-+
-+		if (va == 0 || !pmap_extract(kernel_pmap, va, &pa) || pa == 0) {
-+			printf("SWEET MALI: v35 no framebuffer in PE_state (va=%08x)\n", (uint32_t)va);
-+			return;
-+		}
-+		fb_base = pa;
-+		fb_stride = (uint32_t)PE_state.video.v_rowBytes;
-+		fb_w = (uint32_t)PE_state.video.v_width;
-+		fb_h = (uint32_t)PE_state.video.v_height;
++	/*
++	 * v_baseAddr is already the PHYSICAL address of the panel buffer: the early
++	 * framebuffer code in this kernel casts it to pmap_paddr_t (patch 0088) and
++	 * hands it to ml_tt_map (patch 0233), so no translation is needed here.
++	 */
++	fb_base = (uint64_t)PE_state.video.v_baseAddr;
++	fb_stride = (uint32_t)PE_state.video.v_rowBytes;
++	fb_w = (uint32_t)PE_state.video.v_width;
++	fb_h = (uint32_t)PE_state.video.v_height;
++	if (fb_base == 0 || fb_stride == 0) {
++		printf("SWEET MALI: v35 no framebuffer in PE_state (base=%08x stride=%u)\n",
++		    (uint32_t)fb_base, fb_stride);
++		return;
 +	}
 +	if (kmem_alloc(kernel_map, &jobpage, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 +	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
