@@ -1,0 +1,156 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1602,6 +1602,117 @@
+ 	return true;
+ }
+ 
++/*
++ * v35: the first thing the GPU draws itself.  The panel buffer's physical base
++ * comes from SweetFramebuffer.cpp (patch 0251) because the GPU reaches memory by
++ * physical address through its own page tables; we map those panel pages into
++ * GPU space and submit one "write value" job per pixel.  A red block in the
++ * top-left corner of the panel is the proof that the GPU, not the CPU, wrote it.
++ */
++extern uint64_t sweet_fb_phys;
++extern uint32_t sweet_fb_rowbytes;
++extern uint32_t sweet_fb_width;
++extern uint32_t sweet_fb_height;
++
++#define MALI_FB_ROWS        4
++#define MALI_FB_COLS        32
++#define MALI_JOB_GPU        0x00800000ull    /* where our job page is mapped */
++#define MALI_FB_GPU         0x00810000ull    /* where the panel pages are mapped */
++#define MALI_FB_RED         0xFFFF0000u      /* BGRA: opaque red */
++
++/* One "write value" job at an explicit target, no result check (used per pixel). */
++static bool
++mali_submit_value(vm_offset_t page, uint64_t job_gpu, uint64_t target_gpu,
++    uint32_t value, uint32_t shader_mask)
++{
++	volatile uint32_t *job = (volatile uint32_t *)page;
++
++	bzero((void *)page, PAGE_SIZE);
++	job[4] = (2u << 1) | 1u | (1u << 16);
++	job[8] = (uint32_t)target_gpu;
++	job[9] = (uint32_t)(target_gpu >> 32);
++	job[10] = 6u;
++	job[12] = value;
++	FlushPoC_DcacheRegion(page, PAGE_SIZE);
++
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_MASK, 0);
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_HEAD_NEXT_LO, (uint32_t)job_gpu);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_HEAD_NEXT_HI, (uint32_t)(job_gpu >> 32));
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_AFFINITY_LO, shader_mask);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_AFFINITY_HI, 0);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_CONFIG_NEXT, MALI_JS_CONFIG);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_COMMAND_NEXT, 1u);
++	return mali_wait(mali_p_gpu, MALI_JOB_INT_RAWSTAT, (1u << 1), (1u << 1), 500000);
++}
++
++static void
++mali_draw_block(uint32_t shader_mask)
++{
++	vm_offset_t jobpage = 0;
++	uint64_t fb_phys[MALI_FB_ROWS];
++	uint32_t in_page[MALI_FB_ROWS];
++	int i, x, sent = 0, got = 0;
++
++	for (i = 0; i < MALI_FB_ROWS; i++) {
++		fb_phys[i] = 0;
++	}
++
++	if (sweet_fb_phys == 0 || sweet_fb_rowbytes == 0) {
++		printf("SWEET MALI: v35 no panel info (phys=%08x%08x stride=%u), GPU draw skipped\n",
++		    (uint32_t)(sweet_fb_phys >> 32), (uint32_t)sweet_fb_phys, sweet_fb_rowbytes);
++		return;
++	}
++	if (kmem_alloc(kernel_map, &jobpage, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
++	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET MALI: v35 no job page\n");
++		return;
++	}
++	printf("SWEET MALI: v35 draw fb phys=%08x%08x stride=%u %ux%u rows=%d cols=%d\n",
++	    (uint32_t)(sweet_fb_phys >> 32), (uint32_t)sweet_fb_phys, sweet_fb_rowbytes,
++	    sweet_fb_width, sweet_fb_height, MALI_FB_ROWS, MALI_FB_COLS);
++
++	/* Our job page, and one panel page per row, all in GPU address space. */
++	if (!mali_map_page(MALI_JOB_GPU, kvtophys(jobpage))) {
++		printf("SWEET MALI: v35 map job page failed\n");
++		kmem_free(kernel_map, jobpage, PAGE_SIZE);
++		return;
++	}
++	for (i = 0; i < MALI_FB_ROWS; i++) {
++		uint64_t row = sweet_fb_phys + (uint64_t)i * sweet_fb_rowbytes;
++
++		fb_phys[i] = row & ~(uint64_t)(PAGE_SIZE - 1);
++		in_page[i] = (uint32_t)(row & (uint64_t)(PAGE_SIZE - 1));
++		if (!mali_map_page(MALI_FB_GPU + (uint64_t)i * PAGE_SIZE, fb_phys[i])) {
++			printf("SWEET MALI: v35 map fb row %d failed\n", i);
++			kmem_free(kernel_map, jobpage, PAGE_SIZE);
++			return;
++		}
++	}
++	mali_as0_update(mali_pt_top_phys, MALI_TRANSCFG_4K);
++
++	for (i = 0; i < MALI_FB_ROWS; i++) {
++		for (x = 0; x < MALI_FB_COLS; x++) {
++			uint64_t target = MALI_FB_GPU + (uint64_t)i * PAGE_SIZE +
++			    in_page[i] + (uint64_t)x * 4u;
++
++			if (mali_submit_value(jobpage, MALI_JOB_GPU, target,
++			    MALI_FB_RED, shader_mask)) {
++				got++;
++			}
++			sent++;
++		}
++	}
++	printf("SWEET MALI: v35 draw done sent=%d completed=%d\n", sent, got);
++
++	for (i = 0; i < MALI_FB_ROWS; i++) {
++		(void)mali_unmap_page(MALI_FB_GPU + (uint64_t)i * PAGE_SIZE);
++	}
++	(void)mali_unmap_page(MALI_JOB_GPU);
++	mali_as0_update(0, 2);
++	kmem_free(kernel_map, jobpage, PAGE_SIZE);
++}
++
+ static void
+ mali_first_job(uint32_t shader_mask)
+ {
+@@ -1700,12 +1811,15 @@
+ 		}
+ 	}
+ 
++	/* v35: let the GPU paint into the panel it is looking at. */
++	mali_draw_block(shader_mask);
++
+ 	/*
+ 	 * Back to identity before freeing: the mappings above are gone and the
+ 	 * table pages stay allocated (three pages, a bounded leak by design).
+ 	 */
+ 	mali_as0_update(0, 2);
+-	printf("SWEET MALI: v34 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v35 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+@@ -1739,7 +1853,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v34 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v35 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -1802,7 +1916,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v34");
++		mali_bg3d_gate("v35");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}

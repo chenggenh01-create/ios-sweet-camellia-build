@@ -1,0 +1,27 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -84,6 +84,14 @@
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
+ 
+ /* 0 = not started, 1 = running, <0 = failed stage (see AppleCLCD::start). */
+ extern "C" int sweet_display_state = 0;
++
++/*
++ * v35: the panel buffer, for the GPU side (bsd/dev/sweet_touch_mtk.c).  The GPU
++ * writes into panel memory through its own page tables, so it needs the
++ * physical base, not the kernel's mapping, plus the geometry to address a pixel.
++ */
++extern "C" uint64_t sweet_fb_phys = 0;
++extern "C" uint32_t sweet_fb_rowbytes = 0;
++extern "C" uint32_t sweet_fb_width = 0;
++extern "C" uint32_t sweet_fb_height = 0;
+@@ -208,5 +216,10 @@
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	sweet_fb_phys = (uint64_t)fPhys;
++	sweet_fb_rowbytes = fRowBytes;
++	sweet_fb_width = fWidth;
++	sweet_fb_height = fHeight;
+ 	sweet_display_state = 1;
+ 	return true;
