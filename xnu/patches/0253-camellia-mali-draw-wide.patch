@@ -1,0 +1,67 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1613,7 +1613,7 @@
+  */
+ 
+ #define MALI_FB_ROWS        4
+-#define MALI_FB_COLS        32
++#define MALI_FB_COLS        1080    /* v36: full panel width, so the bars survive the console */
+ #define MALI_JOB_GPU        0x00800000ull    /* where our job page is mapped */
+ #define MALI_FB_GPU         0x00810000ull    /* where the panel pages are mapped */
+ #define MALI_FB_RED         0xFFFF0000u      /* BGRA: opaque red */
+@@ -1652,6 +1652,7 @@
+ 	uint32_t in_page[MALI_FB_ROWS];
+ 	int i, x, sent = 0, got = 0;
+ 	uint64_t fb_base = 0;
++	uint64_t t_start = 0, t_elapsed_ns = 0;
+ 	uint32_t fb_stride = 0, fb_w = 0, fb_h = 0;
+ 
+ 	for (i = 0; i < MALI_FB_ROWS; i++) {
+@@ -1700,6 +1701,7 @@
+ 	}
+ 	mali_as0_update(mali_pt_top_phys, MALI_TRANSCFG_4K);
+ 
++	t_start = mach_absolute_time();
+ 	for (i = 0; i < MALI_FB_ROWS; i++) {
+ 		for (x = 0; x < MALI_FB_COLS; x++) {
+ 			uint64_t target = MALI_FB_GPU + (uint64_t)i * PAGE_SIZE +
+@@ -1712,7 +1714,10 @@
+ 			sent++;
+ 		}
+ 	}
+-	printf("SWEET MALI: v35 draw done sent=%d completed=%d\n", sent, got);
++	absolutetime_to_nanoseconds(mach_absolute_time() - t_start, &t_elapsed_ns);
++	printf("SWEET MALI: v36 draw done sent=%d completed=%d in %llu us (%llu px/s)\n",
++	    sent, got, t_elapsed_ns / 1000ULL,
++	    t_elapsed_ns ? (uint64_t)got * 1000000000ULL / t_elapsed_ns : 0ULL);
+ 
+ 	for (i = 0; i < MALI_FB_ROWS; i++) {
+ 		(void)mali_unmap_page(MALI_FB_GPU + (uint64_t)i * PAGE_SIZE);
+@@ -1828,7 +1833,7 @@
+ 	 * table pages stay allocated (three pages, a bounded leak by design).
+ 	 */
+ 	mali_as0_update(0, 2);
+-	printf("SWEET MALI: v35 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v36 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+@@ -1862,7 +1867,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v35 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v36 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -1925,7 +1930,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v35");
++		mali_bg3d_gate("v36");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
