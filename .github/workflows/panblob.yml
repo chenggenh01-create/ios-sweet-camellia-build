@@ -77,8 +77,19 @@ jobs:
           # which drags in LLVM/clang libraries that have nothing to do with
           # shader compilation for the G57.  Force those branches off; only the
           # panfrost compiler is built here.
-          sed -i "s/^if with_clc$/if false and with_clc/" meson.build
-          grep -n "if false and with_clc" meson.build | head -5
+          # with_clc pulls in Mesa's in-tree OpenCL compiler, which needs the
+          # LLVM SPIR-V translator stack this pipeline does not use.  Force the
+          # variable off right after the block that computes it.
+          python3 - <<'PY'
+          import io
+          p = 'meson.build'
+          s = io.open(p, encoding='utf-8').read()
+          anchor = 'with_llvm = with_llvm \\\n  .enable_if(with_clc'
+          assert anchor in s, 'anchor for with_clc not found'
+          s = s.replace(anchor, 'with_clc = false\n' + anchor, 1)
+          io.open(p, 'w', encoding='utf-8').write(s)
+          PY
+          grep -n "^with_clc = false" meson.build | head -3
           grep -n "LLVMSPIRVLib" meson.build | head -3
 
       - name: Configure
