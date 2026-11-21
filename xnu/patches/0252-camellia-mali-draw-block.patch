@@ -1,21 +1,27 @@
 diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 --- a/bsd/dev/sweet_touch_mtk.c
 +++ b/bsd/dev/sweet_touch_mtk.c
-@@ -1602,6 +1602,117 @@
+@@ -34,6 +34,7 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <vm/vm_kern.h>
++#include <vm/pmap.h>
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 
+@@ -1602,6 +1603,125 @@
  	return true;
  }
  
 +/*
-+ * v35: the first thing the GPU draws itself.  The panel buffer's physical base
-+ * comes from SweetFramebuffer.cpp (patch 0251) because the GPU reaches memory by
-+ * physical address through its own page tables; we map those panel pages into
-+ * GPU space and submit one "write value" job per pixel.  A red block in the
-+ * top-left corner of the panel is the proof that the GPU, not the CPU, wrote it.
++ * v35: the first thing the GPU draws itself.
++ *
++ * The GPU reaches memory by physical address through its own page tables, so it
++ * needs the panel buffer's physical base.  That comes from PE_state.video (the
++ * framebuffer the bootloader handed to the kernel) plus pmap_extract -- no
++ * changes to the display driver, which is how the first attempt at exporting it
++ * from SweetFramebuffer.cpp failed to apply and broke the link instead.
 + */
-+extern uint64_t sweet_fb_phys;
-+extern uint32_t sweet_fb_rowbytes;
-+extern uint32_t sweet_fb_width;
-+extern uint32_t sweet_fb_height;
 +
 +#define MALI_FB_ROWS        4
 +#define MALI_FB_COLS        32
@@ -56,15 +62,25 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	uint64_t fb_phys[MALI_FB_ROWS];
 +	uint32_t in_page[MALI_FB_ROWS];
 +	int i, x, sent = 0, got = 0;
++	uint64_t fb_base = 0;
++	uint32_t fb_stride = 0, fb_w = 0, fb_h = 0;
 +
 +	for (i = 0; i < MALI_FB_ROWS; i++) {
 +		fb_phys[i] = 0;
 +	}
 +
-+	if (sweet_fb_phys == 0 || sweet_fb_rowbytes == 0) {
-+		printf("SWEET MALI: v35 no panel info (phys=%08x%08x stride=%u), GPU draw skipped\n",
-+		    (uint32_t)(sweet_fb_phys >> 32), (uint32_t)sweet_fb_phys, sweet_fb_rowbytes);
-+		return;
++	{
++		vm_offset_t va = (vm_offset_t)PE_state.video.v_baseAddr;
++		uint64_t pa = 0;
++
++		if (va == 0 || !pmap_extract(kernel_pmap, va, &pa) || pa == 0) {
++			printf("SWEET MALI: v35 no framebuffer in PE_state (va=%08x)\n", (uint32_t)va);
++			return;
++		}
++		fb_base = pa;
++		fb_stride = (uint32_t)PE_state.video.v_rowBytes;
++		fb_w = (uint32_t)PE_state.video.v_width;
++		fb_h = (uint32_t)PE_state.video.v_height;
 +	}
 +	if (kmem_alloc(kernel_map, &jobpage, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 +	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
@@ -72,8 +88,8 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +		return;
 +	}
 +	printf("SWEET MALI: v35 draw fb phys=%08x%08x stride=%u %ux%u rows=%d cols=%d\n",
-+	    (uint32_t)(sweet_fb_phys >> 32), (uint32_t)sweet_fb_phys, sweet_fb_rowbytes,
-+	    sweet_fb_width, sweet_fb_height, MALI_FB_ROWS, MALI_FB_COLS);
++	    (uint32_t)(fb_base >> 32), (uint32_t)fb_base, fb_stride, fb_w, fb_h,
++	    MALI_FB_ROWS, MALI_FB_COLS);
 +
 +	/* Our job page, and one panel page per row, all in GPU address space. */
 +	if (!mali_map_page(MALI_JOB_GPU, kvtophys(jobpage))) {
@@ -82,7 +98,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +		return;
 +	}
 +	for (i = 0; i < MALI_FB_ROWS; i++) {
-+		uint64_t row = sweet_fb_phys + (uint64_t)i * sweet_fb_rowbytes;
++		uint64_t row = fb_base + (uint64_t)i * fb_stride;
 +
 +		fb_phys[i] = row & ~(uint64_t)(PAGE_SIZE - 1);
 +		in_page[i] = (uint32_t)(row & (uint64_t)(PAGE_SIZE - 1));
@@ -119,7 +135,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  static void
  mali_first_job(uint32_t shader_mask)
  {
-@@ -1700,12 +1811,15 @@
+@@ -1700,12 +1820,15 @@
  		}
  	}
  
@@ -136,7 +152,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
  	    (uint32_t)mali_pt_top_phys);
  	kmem_free(kernel_map, page, PAGE_SIZE);
-@@ -1739,7 +1853,7 @@
+@@ -1739,7 +1862,7 @@
  	}
  	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
  	dfd = (misc >> 19) & 1u;
@@ -145,7 +161,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
  	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
  	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
-@@ -1802,7 +1916,7 @@
+@@ -1802,7 +1925,7 @@
  	 * PWR_ISO only isolates signals, it does not hold the clock. */
  	printf("SWEET MALI: gpu clocks on\n");
  	if (mfg1_sram) {
