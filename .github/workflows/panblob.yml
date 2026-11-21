@@ -133,38 +133,51 @@ jobs:
           path: diag/
           if-no-files-found: warn
 
-      # panfrost_compile expects OpenCL (kernel) SPIR-V, so compile the kernel as
-      # OpenCL C with clang, translate with llvm-spirv, then let Mesa compile it
-      # to Valhall v9 (G57) machine code.
-      - name: Compile a copy kernel to v9 machine code
+      # panfrost_compile only accepts Mesa's private precompiled-kernel format
+      # and crashes on a normal shader, so build a small host tool that calls
+      # pan_shader_compile() directly, and feed it a Vulkan compute shader.
+      - name: Build the ISA tool and compile a copy kernel
         run: |
           mkdir -p diag
           set -x
-          cat > copy.cl <<'EOF'
-          __kernel void copy_u32(__global const uint *src, __global uint *dst, uint n)
+          cp ci/pan_isa_dump.c mesa/src/panfrost/clc/pan_isa_dump.c
+          cat >> mesa/src/panfrost/clc/meson.build <<'EOF'
+
+          pan_isa_dump = executable(
+            'pan_isa_dump',
+            ['pan_isa_dump.c'],
+            link_with : [libpanfrost_compiler],
+            include_directories : [inc_include, inc_src, inc_panfrost],
+            dependencies : [idep_vtn, idep_nir, idep_mesautil, libpanfrost_dep],
+          )
+          EOF
+          ninja -C mesa/build src/panfrost/clc/pan_isa_dump 2>&1 | tee diag/isa_tool_build.txt | tail -20
+
+          cat > copy.comp <<'EOF'
+          #version 450
+          #extension GL_EXT_buffer_reference : require
+          layout(local_size_x = 64) in;
+          layout(buffer_reference, std430, buffer_reference_align = 4) buffer Buf {
+            uint data[];
+          };
+          layout(push_constant) uniform PC {
+            Buf src;
+            Buf dst;
+            uint n;
+          } pc;
+          void main()
           {
-            uint i = (uint)get_global_id(0);
-            if (i < n)
-              dst[i] = src[i];
+            uint i = gl_GlobalInvocationID.x;
+            if (i < pc.n)
+              pc.dst.data[i] = pc.src.data[i];
           }
           EOF
-          clang-18 -x cl -cl-std=CL1.2 -target spir64-unknown-unknown -O1 \
-            -emit-llvm -c copy.cl -o copy.bc 2>&1 | tee diag/clang.txt
-          llvm-spirv-18 copy.bc -o copy.spv 2>&1 | tee -a diag/clang.txt
-          ls -l copy.bc copy.spv
-          set +e
-          mesa/build/src/panfrost/clc/panfrost_compile copy 9 copy.spv copy.h copy.c \
-            > diag/panfrost_compile.txt 2>&1
-          RC=$?
-          echo "panfrost_compile exit=$RC" | tee -a diag/panfrost_compile.txt
-          if [ $RC -ne 0 ]; then
-            gdb -batch -ex run -ex bt --args \
-              mesa/build/src/panfrost/clc/panfrost_compile copy 9 copy.spv copy.h copy.c \
-              > diag/panfrost_compile_gdb.txt 2>&1 || true
-          fi
-          ls -l copy.h copy.c
-          head -40 copy.h || true
-          grep -c '0x' copy.c || true
+          glslangValidator -V -S comp --target-env vulkan1.2 copy.comp -o copy.spv 2>&1 | tee diag/glslang.txt
+          ls -l copy.spv
+          mesa/build/src/panfrost/clc/pan_isa_dump 9 copy.spv copy.bin 2>&1 | tee diag/isa_dump.txt
+          echo "isa_dump exit=$?" | tee -a diag/isa_dump.txt
+          ls -l copy.bin || true
+          xxd -l 128 copy.bin > diag/isa_head.txt 2>&1 || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -172,9 +185,7 @@ jobs:
           name: mali-v9-copy-blob
           path: |
             copy.spv
-            copy.h
-            copy.c
-            diag/clang.txt
-            diag/panfrost_compile.txt
-            diag/panfrost_compile_gdb.txt
+            copy.bin
+            copy.comp
+            diag/
           if-no-files-found: warn
