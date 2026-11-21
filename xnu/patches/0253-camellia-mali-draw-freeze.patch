@@ -18,6 +18,18 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	uint32_t fb_stride = 0, fb_w = 0, fb_h = 0;
  
  	for (i = 0; i < MALI_FB_ROWS; i++) {
+@@ -1677,9 +1678,9 @@
+ 		printf("SWEET MALI: v35 no job page\n");
+ 		return;
+ 	}
+-	printf("SWEET MALI: v35 draw fb phys=%08x%08x stride=%u %ux%u rows=%d cols=%d\n",
++	printf("SWEET MALI: v37 fb phys=%08x%08x stride=%u %ux%u, drawing %d px then freezing 20 s\n",
+ 	    (uint32_t)(fb_base >> 32), (uint32_t)fb_base, fb_stride, fb_w, fb_h,
+-	    MALI_FB_ROWS, MALI_FB_COLS);
++	    MALI_FB_ROWS * MALI_FB_COLS);
+ 
+ 	/* Our job page, and one panel page per row, all in GPU address space. */
+ 	if (!mali_map_page(MALI_JOB_GPU, kvtophys(jobpage))) {
 @@ -1700,6 +1701,7 @@
  	}
  	mali_as0_update(mali_pt_top_phys, MALI_TRANSCFG_4K);
@@ -26,42 +38,55 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	for (i = 0; i < MALI_FB_ROWS; i++) {
  		for (x = 0; x < MALI_FB_COLS; x++) {
  			uint64_t target = MALI_FB_GPU + (uint64_t)i * PAGE_SIZE +
-@@ -1712,7 +1714,10 @@
+@@ -1712,7 +1714,23 @@
  			sent++;
  		}
  	}
 -	printf("SWEET MALI: v35 draw done sent=%d completed=%d\n", sent, got);
 +	absolutetime_to_nanoseconds(mach_absolute_time() - t_start, &t_elapsed_ns);
-+	printf("SWEET MALI: v36 draw done sent=%d completed=%d in %llu us (%llu px/s)\n",
++	/*
++	 * Nothing may print between the draw and the user looking at the panel:
++	 * every console write repaints it and would wipe the bars.  Spin instead of
++	 * sleeping because this runs on the boot path.
++	 */
++	{
++		uint64_t start_ns = 0, now_ns = 0;
++
++		absolutetime_to_nanoseconds(mach_absolute_time(), &start_ns);
++		do {
++			absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
++		} while (now_ns - start_ns < 20ULL * (uint64_t)NSEC_PER_SEC);
++	}
++	printf("SWEET MALI: v37 done sent=%d completed=%d in %llu us (%llu px/s)\n",
 +	    sent, got, t_elapsed_ns / 1000ULL,
 +	    t_elapsed_ns ? (uint64_t)got * 1000000000ULL / t_elapsed_ns : 0ULL);
  
  	for (i = 0; i < MALI_FB_ROWS; i++) {
  		(void)mali_unmap_page(MALI_FB_GPU + (uint64_t)i * PAGE_SIZE);
-@@ -1828,7 +1833,7 @@
+@@ -1828,7 +1846,7 @@
  	 * table pages stay allocated (three pages, a bounded leak by design).
  	 */
  	mali_as0_update(0, 2);
 -	printf("SWEET MALI: v35 first job state=%x pt_pages=%u top=%08x%08x\n",
-+	printf("SWEET MALI: v36 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v37 first job state=%x pt_pages=%u top=%08x%08x\n",
  	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
  	    (uint32_t)mali_pt_top_phys);
  	kmem_free(kernel_map, page, PAGE_SIZE);
-@@ -1862,7 +1867,7 @@
+@@ -1862,7 +1880,7 @@
  	}
  	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
  	dfd = (misc >> 19) & 1u;
 -	printf("SWEET MALI: v35 power-on start 16C=%08x 170=%08x\n",
-+	printf("SWEET MALI: v36 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v37 power-on start 16C=%08x 170=%08x\n",
  	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
  	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
  	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
-@@ -1925,7 +1930,7 @@
+@@ -1925,7 +1943,7 @@
  	 * PWR_ISO only isolates signals, it does not hold the clock. */
  	printf("SWEET MALI: gpu clocks on\n");
  	if (mfg1_sram) {
 -		mali_bg3d_gate("v35");
-+		mali_bg3d_gate("v36");
++		mali_bg3d_gate("v37");
  	} else {
  		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
  	}
