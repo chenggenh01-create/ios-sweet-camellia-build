@@ -1,9 +1,8 @@
 name: panblob
 
-# Builds Mesa's panfrost shader compiler on Linux and (later) emits a Mali
-# Valhall ISA blob for the G57 on the camellia board.  The XNU build lives in
-# xnu.yml on macOS; this is a separate pipeline because Mesa needs Linux and a
-# lot of build tooling.
+# Builds Mesa's panfrost shader compiler on Linux and emits Mali Valhall ISA
+# for the G57 on the camellia board.  The XNU build lives in xnu.yml on macOS;
+# this is a separate pipeline because Mesa needs Linux and a lot of tooling.
 
 on:
   workflow_dispatch:
@@ -13,16 +12,21 @@ on:
       - 'ci/**'
 
 jobs:
-  probe:
+  build:
     runs-on: ubuntu-24.04
     steps:
-      - name: Deps
+      - name: Deps (meson from pip: Mesa wants >= 1.5)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build python3-mako python3-yaml python3-ply \
-            libdrm-dev pkg-config bison flex zlib1g-dev libzstd-dev \
-            libexpat1-dev libwayland-dev wayland-protocols clang
+            ninja-build python3-pip python3-venv python3-mako python3-yaml \
+            python3-ply libdrm-dev pkg-config bison flex zlib1g-dev \
+            libzstd-dev libexpat1-dev libwayland-dev wayland-protocols clang
+          python3 -m venv ~/venv
+          ~/venv/bin/pip install -q --upgrade pip
+          ~/venv/bin/pip install -q "meson>=1.5" ninja
+          echo "$HOME/venv/bin" >> $GITHUB_PATH
+          meson --version && ninja --version
 
       - name: Fetch Mesa (pinned)
         run: |
@@ -30,7 +34,7 @@ jobs:
             https://gitlab.freedesktop.org/mesa/mesa.git mesa
           cd mesa && git log -1 --oneline
 
-      - name: Configure minimal
+      - name: Configure with the panfrost tools
         run: |
           cd mesa
           meson setup build \
@@ -41,23 +45,36 @@ jobs:
             -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
             -Dplatforms= -Dvideo-codecs= \
             -Dzstd=disabled -Dlz4=disabled \
-            2>&1 | tail -40
+            2>&1 | tail -25
 
-      - name: List compiler targets
+      - name: Build
         run: |
           cd mesa
-          meson introspect build --targets \
-            | python3 -c "import json,sys; t=json.load(sys.stdin); [print(x.get('name')) for x in t if 'panfrost' in (x.get('name') or '').lower() or 'pan_' in (x.get('name') or '')]" | sort | head -40
+          ninja -C build 2>&1 | tail -25 || true
+          echo '--- panfrost tools ---'
+          find build -type f -perm -u+x \( -name '*pan*' -o -name '*clc*' \) | head -20
+          echo '--- compiler library ---'
+          find build -name 'libpanfrost_compiler*' | head -5
 
-      - name: Build the compiler library
+      - name: Try compiling an OpenCL copy kernel
         run: |
           cd mesa
-          ninja -C build src/panfrost/compiler/libpanfrost_compiler.a 2>&1 | tail -30 || true
-          ls -l build/src/panfrost/compiler/ || true
-
-      - name: Which compiler files are there
-        run: |
-          cd mesa
-          ls -1 src/panfrost/compiler/valhall 2>/dev/null | head -20
-          ls -1 src/panfrost/compiler/bifrost/valhall 2>/dev/null | head -20
-          ls -1 src/panfrost/clc 2>/dev/null | head -20
+          TOOL=$(find build -type f -perm -u+x -name 'pan_compile' | head -1)
+          echo "tool: $TOOL"
+          if [ -n "$TOOL" ]; then
+            "$TOOL" --help 2>&1 | head -30 || true
+            cat > /tmp/copy.cl <<'EOF'
+          __kernel void copy_u32(__global const uint *src, __global uint *dst, uint n)
+          {
+            size_t i = get_global_id(0);
+            if (i < n)
+              dst[i] = src[i];
+          }
+          EOF
+            echo '--- compile attempt ---'
+            "$TOOL" --gpu G57 -o /tmp/copy.bin /tmp/copy.cl 2>&1 | head -20 || \
+            "$TOOL" /tmp/copy.cl 2>&1 | head -20 || true
+            ls -l /tmp/copy* 2>/dev/null || true
+          else
+            echo 'no pan_compile tool was produced'
+          fi
