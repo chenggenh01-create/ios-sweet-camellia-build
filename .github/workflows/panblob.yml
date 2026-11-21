@@ -32,7 +32,7 @@ jobs:
             libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev \
             libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev libxcb-shm0-dev \
             libxcb-glx0-dev libxext-dev libxrandr-dev libxxf86vm-dev \
-            libxshmfence-dev libdrm-dev
+            libxshmfence-dev libdrm-dev clang-18 llvm-spirv-18
           python3 -m venv ~/venv
           ~/venv/bin/pip install -q --upgrade pip
           ~/venv/bin/pip install -q "meson>=1.5" ninja "mako>=0.8" packaging pyyaml ply setuptools
@@ -133,25 +133,29 @@ jobs:
           path: diag/
           if-no-files-found: warn
 
+      # panfrost_compile expects OpenCL (kernel) SPIR-V, so compile the kernel as
+      # OpenCL C with clang, translate with llvm-spirv, then let Mesa compile it
+      # to Valhall v9 (G57) machine code.
       - name: Compile a copy kernel to v9 machine code
         run: |
+          mkdir -p diag
           set -x
-          cat > copy.comp <<'EOF'
-          #version 450
-          layout(local_size_x = 64) in;
-          layout(set = 0, binding = 0) buffer Src { uint src[]; };
-          layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
-          void main()
+          cat > copy.cl <<'EOF'
+          __kernel void copy_u32(__global const uint *src, __global uint *dst, uint n)
           {
-            uint i = gl_GlobalInvocationID.x;
-            dst[i] = src[i];
+            uint i = (uint)get_global_id(0);
+            if (i < n)
+              dst[i] = src[i];
           }
           EOF
-          glslangValidator -V -S comp copy.comp -o copy.spv
-          ls -l copy.spv
-          mesa/build/src/panfrost/clc/panfrost_compile copy 9 copy.spv copy.h copy.c
+          clang-18 -x cl -cl-std=CL1.2 -target spir64-unknown-unknown -O1 \
+            -emit-llvm -c copy.cl -o copy.bc 2>&1 | tee diag/clang.txt
+          llvm-spirv-18 copy.bc -o copy.spv 2>&1 | tee -a diag/clang.txt
+          ls -l copy.bc copy.spv
+          mesa/build/src/panfrost/clc/panfrost_compile copy 9 copy.spv copy.h copy.c \
+            2>&1 | tee diag/panfrost_compile.txt
           ls -l copy.h copy.c
-          head -30 copy.h || true
+          head -40 copy.h || true
           grep -c '0x' copy.c || true
 
       - uses: actions/upload-artifact@v4
@@ -162,4 +166,6 @@ jobs:
             copy.spv
             copy.h
             copy.c
+            diag/clang.txt
+            diag/panfrost_compile.txt
           if-no-files-found: warn
