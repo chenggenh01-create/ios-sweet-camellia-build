@@ -29,7 +29,7 @@ jobs:
             libzstd-dev libexpat1-dev libudev-dev cmake clang glslang-tools spirv-tools
           python3 -m venv ~/venv
           ~/venv/bin/pip install -q --upgrade pip
-          ~/venv/bin/pip install -q "meson>=1.5" ninja "mako>=0.8" packaging pyyaml ply
+          ~/venv/bin/pip install -q "meson>=1.5" ninja "mako>=0.8" packaging pyyaml ply setuptools
           echo "$HOME/venv/bin" >> $GITHUB_PATH
           ~/venv/bin/meson --version && ~/venv/bin/ninja --version
 
@@ -68,6 +68,7 @@ jobs:
           cd mesa
           meson setup build \
             -Dtools=panfrost \
+            -Dpanfrost-rust=disabled \
             -Dbuild-tests=false \
             -Dgallium-drivers= \
             -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
