@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Compile a Vulkan compute SPIR-V shader to Mali machine code with Mesa's
  * panfrost back-end, from the build host.
  *
@@ -24,6 +24,7 @@
 
 #include "compiler/glsl_types.h"
 #include "compiler/spirv/nir_spirv.h"
+#include "nir.h"
 #include "panfrost/compiler/pan_compiler.h"
 #include "util/u_dynarray.h"
 
