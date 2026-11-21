@@ -87,7 +87,6 @@ jobs:
           meson setup build \
             -Dtools=panfrost \
             -Dpanfrost-rust=false \
-
             -Dbuild-tests=false \
             -Dgallium-drivers= \
             -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
