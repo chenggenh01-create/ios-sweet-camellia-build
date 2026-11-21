@@ -32,7 +32,7 @@ jobs:
             libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev \
             libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev libxcb-shm0-dev \
             libxcb-glx0-dev libxext-dev libxrandr-dev libxxf86vm-dev \
-            libxshmfence-dev libdrm-dev clang-18 llvm-spirv-18
+            libxshmfence-dev libdrm-dev clang-18 llvm-spirv-18 gdb
           python3 -m venv ~/venv
           ~/venv/bin/pip install -q --upgrade pip
           ~/venv/bin/pip install -q "meson>=1.5" ninja "mako>=0.8" packaging pyyaml ply setuptools
@@ -152,8 +152,16 @@ jobs:
             -emit-llvm -c copy.cl -o copy.bc 2>&1 | tee diag/clang.txt
           llvm-spirv-18 copy.bc -o copy.spv 2>&1 | tee -a diag/clang.txt
           ls -l copy.bc copy.spv
+          set +e
           mesa/build/src/panfrost/clc/panfrost_compile copy 9 copy.spv copy.h copy.c \
-            2>&1 | tee diag/panfrost_compile.txt
+            > diag/panfrost_compile.txt 2>&1
+          RC=$?
+          echo "panfrost_compile exit=$RC" | tee -a diag/panfrost_compile.txt
+          if [ $RC -ne 0 ]; then
+            gdb -batch -ex run -ex bt --args \
+              mesa/build/src/panfrost/clc/panfrost_compile copy 9 copy.spv copy.h copy.c \
+              > diag/panfrost_compile_gdb.txt 2>&1 || true
+          fi
           ls -l copy.h copy.c
           head -40 copy.h || true
           grep -c '0x' copy.c || true
@@ -168,4 +176,5 @@ jobs:
             copy.c
             diag/clang.txt
             diag/panfrost_compile.txt
+            diag/panfrost_compile_gdb.txt
           if-no-files-found: warn
