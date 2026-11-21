@@ -1,8 +1,11 @@
 name: panblob
 
-# Builds Mesa's panfrost shader compiler on Linux and emits Mali Valhall ISA
-# for the G57 on the camellia board.  The XNU build lives in xnu.yml on macOS;
-# this is a separate pipeline because Mesa needs Linux and a lot of tooling.
+# Compiles a compute kernel to Mali Valhall (v9, G57) machine code with Mesa's
+# panfrost compiler, on Linux, and uploads the resulting blob.  The XNU kernel
+# then embeds that blob and submits it as a compute job (see xnu.yml).
+#
+# Target device: Redmi Note 10 5G, MT6833 (Dimensity 700), Mali-G57 MC2,
+# GPU_ID 0x90930010 -> Valhall v9.  Not Bifrost, not Adreno.
 
 on:
   workflow_dispatch:
@@ -15,13 +18,15 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: Deps (meson from pip, Mesa wants 1.5 or newer)
+      - uses: actions/checkout@v4
+
+      - name: Deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build python3-pip python3-venv python3-mako python3-yaml \
             python3-ply libdrm-dev pkg-config bison flex zlib1g-dev \
-            libzstd-dev libexpat1-dev libwayland-dev wayland-protocols clang
+            libzstd-dev libexpat1-dev clang glslang-tools spirv-tools
           python3 -m venv ~/venv
           ~/venv/bin/pip install -q --upgrade pip
           ~/venv/bin/pip install -q "meson>=1.5" ninja
@@ -34,47 +39,54 @@ jobs:
             https://gitlab.freedesktop.org/mesa/mesa.git mesa
           cd mesa && git log -1 --oneline
 
-      - name: Configure with the panfrost tools
+      - name: Configure
         run: |
           cd mesa
           meson setup build \
             -Dtools=panfrost \
+            -Dprecomp-compiler=enabled \
+            -Dvulkan-drivers=panfrost \
             -Dbuild-tests=false \
             -Dgallium-drivers= \
-            -Dvulkan-drivers= \
             -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
             -Dplatforms= -Dvideo-codecs= \
-            -Dzstd=disabled -Dlz4=disabled \
-            2>&1 | tail -25
+            -Dzstd=disabled \
+            2>&1 | tail -20
 
-      - name: Build
+      - name: Build panfrost_compile
         run: |
           cd mesa
-          ninja -C build 2>&1 | tail -25 || true
-          echo '--- panfrost tools ---'
-          find build -type f -perm -u+x \( -name '*pan*' -o -name '*clc*' \) | head -20
-          echo '--- compiler library ---'
-          find build -name 'libpanfrost_compiler*' | head -5
+          ninja -C build src/panfrost/clc/panfrost_compile
+          ls -l build/src/panfrost/clc/panfrost_compile
+          ./build/src/panfrost/clc/panfrost_compile || true
 
-      - name: Try compiling an OpenCL copy kernel
+      - name: Compile a copy kernel to v9 machine code
         run: |
-          cd mesa
-          TOOL=$(find build -type f -perm -u+x -name 'pan_compile' | head -1)
-          echo "tool: $TOOL"
-          if [ -n "$TOOL" ]; then
-            "$TOOL" --help 2>&1 | head -30 || true
-            cat > /tmp/copy.cl <<'EOF'
-          __kernel void copy_u32(__global const uint *src, __global uint *dst, uint n)
+          set -x
+          cat > copy.comp <<'EOF'
+          #version 450
+          layout(local_size_x = 64) in;
+          layout(set = 0, binding = 0) buffer Src { uint src[]; };
+          layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
+          void main()
           {
-            size_t i = get_global_id(0);
-            if (i < n)
-              dst[i] = src[i];
+            uint i = gl_GlobalInvocationID.x;
+            dst[i] = src[i];
           }
           EOF
-            echo '--- compile attempt ---'
-            "$TOOL" --gpu G57 -o /tmp/copy.bin /tmp/copy.cl 2>&1 | head -20 || \
-            "$TOOL" /tmp/copy.cl 2>&1 | head -20 || true
-            ls -l /tmp/copy* 2>/dev/null || true
-          else
-            echo 'no pan_compile tool was produced'
-          fi
+          glslangValidator -V -S comp copy.comp -o copy.spv
+          ls -l copy.spv
+          mesa/build/src/panfrost/clc/panfrost_compile copy 9 copy.spv copy.h copy.c
+          ls -l copy.h copy.c
+          head -30 copy.h || true
+          grep -c '0x' copy.c || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mali-v9-copy-blob
+          path: |
+            copy.spv
+            copy.h
+            copy.c
+          if-no-files-found: warn
