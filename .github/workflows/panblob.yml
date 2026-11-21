@@ -32,16 +32,12 @@ jobs:
           ~/venv/bin/pip install -q "meson>=1.5" ninja "mako>=0.8" packaging pyyaml ply setuptools
           echo "$HOME/venv/bin" >> $GITHUB_PATH
           ~/venv/bin/meson --version && ~/venv/bin/ninja --version
-          # Mesa asks for bindgen as soon as any Rust component is enabled, and
-          # which component pulls it in is not obvious; installing it is cheaper
-          # than guessing.  apt first, cargo as the fallback.
-          sudo apt-get install -y bindgen 2>/dev/null || true
-          if ! command -v bindgen >/dev/null; then
-            echo "apt has no bindgen, building it with cargo"
-            cargo install --quiet bindgen-cli
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          fi
-          bindgen --version || true
+          # Mesa needs bindgen >= 0.71.1 and noble's package is 0.66, so build the
+          # current one from crates.io and put it ahead of /usr/bin.
+          cargo install --quiet bindgen-cli
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.cargo/bin:$PATH"
+          bindgen --version
 
       # Ubuntu 24.04 ships libdrm 2.4.125 and Mesa 26.3 wants >= 2.4.133, so
       # build the released tag here and put its .pc files on the search path.
