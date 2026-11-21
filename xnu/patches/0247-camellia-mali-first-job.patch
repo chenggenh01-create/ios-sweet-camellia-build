@@ -1,6 +1,12 @@
 diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 --- a/bsd/dev/sweet_touch_mtk.c
 +++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1,4 +1,4 @@
+-﻿/*
++/*
+  * camellia (MT6833 / Dimensity 700) Novatek NT36672C touch probe.
+  *
+  * Register model and bit-bang timing are taken from the working
 @@ -33,6 +33,7 @@
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
@@ -9,7 +15,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  
-@@ -1332,6 +1333,119 @@
+@@ -1332,6 +1333,183 @@
  }
  
  
@@ -53,8 +59,46 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +#define MALI_JS_CONFIG       ((3u << 8) | (3u << 12) | (8u << 16))   /* AS 0, flush caches both ends */
 +#define MALI_JOB_MAGIC       0xc0ffee01u
 +#define MALI_JOB_OFFSET      0x800u
++#define MALI_MMU_INT_RAWSTAT 0x2000u
++#define MALI_MMU_INT_CLEAR   0x2004u
++#define MALI_AS_FAULTADDR_LO 0x20u
++#define MALI_AS_FAULTADDR_HI 0x24u
 +
-+static unsigned mali_job_state;   /* 0 not tried, 1 ran, 2 submitted but word unchanged */
++static unsigned mali_job_state;   /* 0 not tried, 1 ran, 2 unchanged, 3 faulted and gpu reset */
++
++static void mali_as0_update(uint64_t transtab, uint32_t transcfg);   /* used by the recovery below */
++
++/*
++ * Put the GPU back in a runnable state after a job that did not finish, and do
++ * it BEFORE the page holding the job header is returned to the allocator: a
++ * head pointer left in the slot would otherwise point at memory that the next
++ * kmem_alloc hands to somebody else, and the GPU would write there.  Same order
++ * as redwood_mali.c (soft reset, cores back on, address space reinstated).
++ */
++static void
++mali_gpu_recover(uint32_t shader_mask)
++{
++	printf("SWEET MALI: recover: int clear, soft reset\n");
++	mali_pwr(mali_p_gpu, 0x024, 0xffffffffu);                   /* GPU_INT_CLEAR */
++	mali_pwr(mali_p_gpu, 0x030, 1u);                            /* GPU_CMD soft reset */
++	if (!mali_wait(mali_p_gpu, 0x020, 1u << 8, 1u << 8, 500000)) {
++		printf("SWEET MALI: recover: reset incomplete raw=%08x\n",
++		    mali_prd(mali_p_gpu, 0x020));
++	}
++	mali_pwr(mali_p_gpu, 0x024, 0xffffffffu);
++	mali_pwr(mali_p_gpu, 0x1a0, mali_prd(mali_p_gpu, 0x120));   /* L2_PWRON */
++	mali_pwr(mali_p_gpu, 0x190, mali_prd(mali_p_gpu, 0x110));   /* TILER_PWRON */
++	mali_pwr(mali_p_gpu, 0x180, shader_mask);                   /* SHADER_PWRON */
++	(void)mali_wait(mali_p_gpu, 0x160, mali_prd(mali_p_gpu, 0x120),
++	    mali_prd(mali_p_gpu, 0x120), 5000);
++	(void)mali_wait(mali_p_gpu, 0x150, mali_prd(mali_p_gpu, 0x110),
++	    mali_prd(mali_p_gpu, 0x110), 5000);
++	(void)mali_wait(mali_p_gpu, 0x140, shader_mask, shader_mask, 5000);
++	mali_as0_update(0, 2);
++	mali_pwr(mali_p_gpu, MALI_MMU_INT_CLEAR, 0xffffffffu);
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
++	printf("SWEET MALI: recover: done raw=%08x\n", mali_prd(mali_p_gpu, 0x020));
++}
 +
 +/* Identity mode is TRANS_CFG = 2: the MMU passes the address through as is. */
 +static void
@@ -67,7 +111,10 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_MEMATTR_LO, 0x88888888u);
 +	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_MEMATTR_HI, 0x88888888u);
 +	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_COMMAND, 1u);     /* update */
-+	(void)mali_wait(mali_p_gpu, MALI_AS0 + MALI_AS_STATUS, 1u, 0u, 5000);
++	if (!mali_wait(mali_p_gpu, MALI_AS0 + MALI_AS_STATUS, 1u, 0u, 5000)) {
++		printf("SWEET MALI: as0 update did not settle status=%08x\n",
++		    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_STATUS));
++	}
 +}
 +
 +static bool
@@ -75,7 +122,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +{
 +	volatile uint32_t *job = (volatile uint32_t *)page;
 +	volatile uint32_t *target = (volatile uint32_t *)(page + MALI_JOB_OFFSET);
-+	bool ok;
++	bool done, ok;
 +
 +	bzero((void *)page, PAGE_SIZE);
 +	job[4] = (2u << 1) | 1u | (1u << 16);    /* write a value, 64-bit pointers, job index 1 */
@@ -84,7 +131,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	job[10] = 6u;                            /* a 32-bit immediate */
 +	job[12] = MALI_JOB_MAGIC;
 +	FlushPoC_DcacheRegion(page, PAGE_SIZE);
-+	printf("SWEET MALI: job %s: submit gpu=%08x%08x slot1 head=%08x shader=%08x\n", what,
++	printf("SWEET MALI: job %s: submit gpu=%08x%08x slot1 status=%08x shader=%08x\n", what,
 +	    (uint32_t)(gpu >> 32), (uint32_t)gpu, mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS),
 +	    shader_mask);
 +
@@ -96,14 +143,24 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_AFFINITY_HI, 0);
 +	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_CONFIG_NEXT, MALI_JS_CONFIG);
 +	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_COMMAND_NEXT, 1u);     /* start */
-+	(void)mali_wait(mali_p_gpu, MALI_JOB_INT_RAWSTAT, (1u << 1), (1u << 1), 200000);
++	/* A loop count is not a time bound, so the budget is generous and the
++	 * result is kept: a job landing just after the wait would otherwise read as
++	 * "not written" while the GPU did run it. */
++	done = mali_wait(mali_p_gpu, MALI_JOB_INT_RAWSTAT, (1u << 1), (1u << 1), 2000000);
 +
 +	FlushPoC_DcacheRegion(page, PAGE_SIZE);
++	if (!done) {
++		done = (mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT) & (1u << 1)) != 0;
++	}
 +	ok = (*target == MALI_JOB_MAGIC);
-+	printf("SWEET MALI: job %s: raw=%08x slot=%08x fault=%08x word=%08x %s\n", what,
++	printf("SWEET MALI: job %s: done=%d raw=%08x slot=%08x fault=%08x at=%08x%08x mmu=%08x word=%08x %s\n",
++	    what, done ? 1 : 0,
 +	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
 +	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS),
-+	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTSTATUS), *target,
++	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTSTATUS),
++	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTADDR_HI),
++	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTADDR_LO),
++	    mali_prd(mali_p_gpu, MALI_MMU_INT_RAWSTAT), *target,
 +	    ok ? "-- GPU RAN IT" : "-- NOT written");
 +	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
 +	return ok;
@@ -113,23 +170,36 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +mali_first_job(uint32_t shader_mask)
 +{
 +	vm_offset_t page = 0;
++	uint64_t phys;
 +
 +	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 +	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 +		printf("SWEET MALI: no page for the first job\n");
 +		return;
 +	}
-+	printf("SWEET MALI: first job page=%08x phys=%08x\n", (uint32_t)page,
-+	    (uint32_t)kvtophys(page));
++	phys = kvtophys(page);
++	printf("SWEET MALI: first job page=%08x phys=%08x%08x\n", (uint32_t)page,
++	    (uint32_t)(phys >> 32), (uint32_t)phys);
++	if (phys == 0 || (phys & (PAGE_SIZE - 1)) != 0) {
++		printf("SWEET MALI: first job: implausible physical address, skipped\n");
++		kmem_free(kernel_map, page, PAGE_SIZE);
++		return;
++	}
 +	mali_as0_update(0, 2);           /* identity: a GPU address is the physical one */
-+	mali_job_state = mali_run_write_job(page, kvtophys(page), shader_mask, "identity") ? 1 : 2;
++	if (mali_run_write_job(page, phys, shader_mask, "identity")) {
++		mali_job_state = 1;
++	} else {
++		/* The slot may still hold this page's address: reset before freeing. */
++		mali_gpu_recover(shader_mask);
++		mali_job_state = 3;
++	}
 +	kmem_free(kernel_map, page, PAGE_SIZE);
 +}
 +
  static void
  sweet_mali_power(void)
  {
-@@ -1360,7 +1474,7 @@
+@@ -1360,7 +1538,7 @@
  	}
  	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
  	dfd = (misc >> 19) & 1u;
@@ -138,7 +208,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
  	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
  	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
-@@ -1423,7 +1537,7 @@
+@@ -1423,7 +1601,7 @@
  	 * PWR_ISO only isolates signals, it does not hold the clock. */
  	printf("SWEET MALI: gpu clocks on\n");
  	if (mfg1_sram) {
@@ -147,7 +217,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	} else {
  		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
  	}
-@@ -1489,6 +1603,8 @@
+@@ -1489,6 +1667,8 @@
  	printf("SWEET MALI: GPU ready, GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n",
  	    mali_prd(mali_p_gpu, 0x000), mali_prd(mali_p_gpu, 0x140),
  	    mali_prd(mali_p_gpu, 0x150), mali_prd(mali_p_gpu, 0x160));
@@ -156,7 +226,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	printf("SWEET MALI: power-on done\n");
  	return;
  
-@@ -1584,6 +1700,15 @@
+@@ -1584,6 +1764,15 @@
  	    *(volatile uint32_t *)(infra + 0x258),
  	    *(volatile uint32_t *)(infra + 0x724),
  	    *(volatile uint32_t *)(infra + 0x600));
