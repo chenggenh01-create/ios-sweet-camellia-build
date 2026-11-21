@@ -1,0 +1,174 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -33,6 +33,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <vm/vm_kern.h>
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 
+@@ -1332,6 +1333,119 @@
+ }
+ 
+ 
++/* ------------------------------------------------------------------ *
++ * v31: the first GPU job.
++ *
++ * panfrost's job manager, the smallest thing that proves the GPU executes:
++ * address space 0 in identity mode (a GPU address is its physical one, so no
++ * page tables are needed yet), one 4 KB page carrying a "write a value" job and
++ * the word it is meant to write, and one job slot told to start.  If the word
++ * changes in memory, the GPU has run a job on this phone for the first time.
++ *
++ * Constants and the job header layout are copied from redwood_mali.c (MT6768,
++ * same job manager), not re-derived; the aperture and the power sequence are
++ * MT6833's own (see the note on 0x13000000 above).
++ * ------------------------------------------------------------------ */
++extern uint64_t kvtophys(vm_offset_t va);
++extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
++
++#define MALI_AS0             0x2400u
++#define MALI_AS_TRANSTAB_LO  0x00u
++#define MALI_AS_TRANSTAB_HI  0x04u
++#define MALI_AS_MEMATTR_LO   0x08u
++#define MALI_AS_MEMATTR_HI   0x0cu
++#define MALI_AS_COMMAND      0x18u
++#define MALI_AS_FAULTSTATUS  0x1cu
++#define MALI_AS_STATUS       0x28u
++#define MALI_AS_TRANSCFG_LO  0x30u
++#define MALI_AS_TRANSCFG_HI  0x34u
++#define MALI_JOB_INT_RAWSTAT 0x1000u
++#define MALI_JOB_INT_CLEAR   0x1004u
++#define MALI_JOB_INT_MASK    0x1008u
++#define MALI_JS1             0x1880u
++#define MALI_JS_STATUS       0x24u
++#define MALI_JS_HEAD_NEXT_LO 0x40u
++#define MALI_JS_HEAD_NEXT_HI 0x44u
++#define MALI_JS_AFFINITY_LO  0x50u
++#define MALI_JS_AFFINITY_HI  0x54u
++#define MALI_JS_CONFIG_NEXT  0x58u
++#define MALI_JS_COMMAND_NEXT 0x60u
++#define MALI_JS_CONFIG       ((3u << 8) | (3u << 12) | (8u << 16))   /* AS 0, flush caches both ends */
++#define MALI_JOB_MAGIC       0xc0ffee01u
++#define MALI_JOB_OFFSET      0x800u
++
++static unsigned mali_job_state;   /* 0 not tried, 1 ran, 2 submitted but word unchanged */
++
++/* Identity mode is TRANS_CFG = 2: the MMU passes the address through as is. */
++static void
++mali_as0_update(uint64_t transtab, uint32_t transcfg)
++{
++	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_TRANSTAB_LO, (uint32_t)transtab);
++	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_TRANSTAB_HI, (uint32_t)(transtab >> 32));
++	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_TRANSCFG_LO, transcfg);
++	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_TRANSCFG_HI, 0);
++	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_MEMATTR_LO, 0x88888888u);
++	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_MEMATTR_HI, 0x88888888u);
++	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_COMMAND, 1u);     /* update */
++	(void)mali_wait(mali_p_gpu, MALI_AS0 + MALI_AS_STATUS, 1u, 0u, 5000);
++}
++
++static bool
++mali_run_write_job(vm_offset_t page, uint64_t gpu, uint32_t shader_mask, const char *what)
++{
++	volatile uint32_t *job = (volatile uint32_t *)page;
++	volatile uint32_t *target = (volatile uint32_t *)(page + MALI_JOB_OFFSET);
++	bool ok;
++
++	bzero((void *)page, PAGE_SIZE);
++	job[4] = (2u << 1) | 1u | (1u << 16);    /* write a value, 64-bit pointers, job index 1 */
++	job[8] = (uint32_t)(gpu + MALI_JOB_OFFSET);
++	job[9] = (uint32_t)((gpu + MALI_JOB_OFFSET) >> 32);
++	job[10] = 6u;                            /* a 32-bit immediate */
++	job[12] = MALI_JOB_MAGIC;
++	FlushPoC_DcacheRegion(page, PAGE_SIZE);
++	printf("SWEET MALI: job %s: submit gpu=%08x%08x slot1 head=%08x shader=%08x\n", what,
++	    (uint32_t)(gpu >> 32), (uint32_t)gpu, mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS),
++	    shader_mask);
++
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_MASK, 0);
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_HEAD_NEXT_LO, (uint32_t)gpu);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_HEAD_NEXT_HI, (uint32_t)(gpu >> 32));
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_AFFINITY_LO, shader_mask);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_AFFINITY_HI, 0);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_CONFIG_NEXT, MALI_JS_CONFIG);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_COMMAND_NEXT, 1u);     /* start */
++	(void)mali_wait(mali_p_gpu, MALI_JOB_INT_RAWSTAT, (1u << 1), (1u << 1), 200000);
++
++	FlushPoC_DcacheRegion(page, PAGE_SIZE);
++	ok = (*target == MALI_JOB_MAGIC);
++	printf("SWEET MALI: job %s: raw=%08x slot=%08x fault=%08x word=%08x %s\n", what,
++	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
++	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS),
++	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTSTATUS), *target,
++	    ok ? "-- GPU RAN IT" : "-- NOT written");
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
++	return ok;
++}
++
++static void
++mali_first_job(uint32_t shader_mask)
++{
++	vm_offset_t page = 0;
++
++	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
++	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET MALI: no page for the first job\n");
++		return;
++	}
++	printf("SWEET MALI: first job page=%08x phys=%08x\n", (uint32_t)page,
++	    (uint32_t)kvtophys(page));
++	mali_as0_update(0, 2);           /* identity: a GPU address is the physical one */
++	mali_job_state = mali_run_write_job(page, kvtophys(page), shader_mask, "identity") ? 1 : 2;
++	kmem_free(kernel_map, page, PAGE_SIZE);
++}
++
+ static void
+ sweet_mali_power(void)
+ {
+@@ -1360,7 +1474,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v30 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v31 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -1423,7 +1537,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v30");
++		mali_bg3d_gate("v31");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
+@@ -1489,6 +1603,8 @@
+ 	printf("SWEET MALI: GPU ready, GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n",
+ 	    mali_prd(mali_p_gpu, 0x000), mali_prd(mali_p_gpu, 0x140),
+ 	    mali_prd(mali_p_gpu, 0x150), mali_prd(mali_p_gpu, 0x160));
++	/* v31: ask the GPU to write a value into a page of ours. */
++	mali_first_job(mali_prd(mali_p_gpu, 0x100));
+ 	printf("SWEET MALI: power-on done\n");
+ 	return;
+ 
+@@ -1584,6 +1700,15 @@
+ 	    *(volatile uint32_t *)(infra + 0x258),
+ 	    *(volatile uint32_t *)(infra + 0x724),
+ 	    *(volatile uint32_t *)(infra + 0x600));
++	/* v31: cores ready and what the first job did, both repeated so a photo of
++	 * the steady state is enough to judge a run. */
++	printf("SWEET MALI: CORE 140=%08x 150=%08x 160=%08x JOB raw=%08x slot=%08x state=%d\n",
++	    mali_p_gpu ? mali_prd(mali_p_gpu, 0x140) : 0,
++	    mali_p_gpu ? mali_prd(mali_p_gpu, 0x150) : 0,
++	    mali_p_gpu ? mali_prd(mali_p_gpu, 0x160) : 0,
++	    mali_p_gpu ? mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT) : 0,
++	    mali_p_gpu ? mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS) : 0,
++	    mali_job_state);
+ }
+ 
+ static void
