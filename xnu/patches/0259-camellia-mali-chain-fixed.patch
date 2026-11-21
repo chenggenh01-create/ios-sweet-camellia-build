@@ -1,0 +1,82 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1883,14 +1883,26 @@
+ 	int i, ok = 0;
+ 
+ 	bzero((void *)page, PAGE_SIZE);
++	/*
++	 * v44: the chain, done the way Mesa describes it (pan_jc.h +
++	 * genxml/v9.xml "Job Header"): the next job's GPU address lives in header
++	 * words 6/7, the index increments, and the last job has next = 0.  The
++	 * payload now writes 64 bits at a time (Write Value Type 7) instead of 32.
++	 */
+ 	for (i = 0; i < 4; i++) {
+-		volatile uint32_t *j = job + (i * 128 / 4);
+-
+-		j[4] = (2u << 1) | 1u | (1u << 16);
+-		j[8] = (uint32_t)(phys + 0x800 + (uint64_t)i * 4);
+-		j[9] = (uint32_t)((phys + 0x800 + (uint64_t)i * 4) >> 32);
+-		j[10] = 6u;
++		volatile uint32_t *j = job + (i * 32);
++		uint64_t next = (i == 3) ? 0 : phys + (uint64_t)(i + 1) * 128;
++		uint64_t target = phys + 0x800 + (uint64_t)i * 8;
++
++		j[4] = (2u << 1) | (1u << 8) | ((uint32_t)(i + 1) << 16);
++		j[5] = 0;
++		j[6] = (uint32_t)next;
++		j[7] = (uint32_t)(next >> 32);
++		j[8] = (uint32_t)target;
++		j[9] = (uint32_t)(target >> 32);
++		j[10] = 7u;                       /* Write Value Type: Immediate 64 */
+ 		j[12] = 0xC0FFEE00u + (uint32_t)i;
++		j[13] = 0x12345000u + (uint32_t)i;
+ 	}
+ 	FlushPoC_DcacheRegion(page, PAGE_SIZE);
+ 
+@@ -1906,12 +1918,15 @@
+ 	FlushPoC_DcacheRegion(page, PAGE_SIZE);
+ 
+ 	for (i = 0; i < 4; i++) {
+-		if (*(volatile uint32_t *)(page + 0x800 + (uint64_t)i * 4) ==
+-		    0xC0FFEE00u + (uint32_t)i) {
++		volatile uint64_t *w = (volatile uint64_t *)(page + 0x800 + (uint64_t)i * 8);
++		uint64_t want = 0x12345000ULL + (uint64_t)i;
++		want = (want << 32) | (0xC0FFEE00U + (uint64_t)i);
++
++		if (*w == want) {
+ 			ok++;
+ 		}
+ 	}
+-	printf("SWEET MALI: v43 chain: %d of 4 chained jobs ran (raw=%08x slot=%08x)\n",
++	printf("SWEET MALI: v44 chain: %d of 4 chained jobs ran (raw=%08x slot=%08x)\n",
+ 	    ok, mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
+ 	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS));
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
+@@ -2033,7 +2048,7 @@
+ 	 */
+ 	mali_as0_update(0, 2);
+ 	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
+-	printf("SWEET MALI: v43 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v44 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+@@ -2067,7 +2082,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v43 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v44 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -2130,7 +2145,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v43");
++		mali_bg3d_gate("v44");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
