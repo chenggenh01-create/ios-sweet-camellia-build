@@ -99,7 +99,7 @@ jobs:
             -Dtools=panfrost \
             -Dpanfrost-rust=false \
             -Dbuild-tests=false \
-            -Dgallium-drivers= \
+            -Dgallium-drivers=softpipe \
             -Dvulkan-drivers= \
             -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
             -Dplatforms=x11 -Dvideo-codecs= \
