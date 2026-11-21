@@ -1,0 +1,63 @@
+name: panblob
+
+# Builds Mesa's panfrost shader compiler on Linux and (later) emits a Mali
+# Valhall ISA blob for the G57 on the camellia board.  The XNU build lives in
+# xnu.yml on macOS; this is a separate pipeline because Mesa needs Linux and a
+# lot of build tooling.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/panblob.yml'
+      - 'ci/**'
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build python3-mako python3-yaml python3-ply \
+            libdrm-dev pkg-config bison flex zlib1g-dev libzstd-dev \
+            libexpat1-dev libwayland-dev wayland-protocols clang
+
+      - name: Fetch Mesa (pinned)
+        run: |
+          git clone --depth 1 --branch mesa-26.3.1 \
+            https://gitlab.freedesktop.org/mesa/mesa.git mesa
+          cd mesa && git log -1 --oneline
+
+      - name: Configure minimal
+        run: |
+          cd mesa
+          meson setup build \
+            -Dtools=panfrost \
+            -Dbuild-tests=false \
+            -Dgallium-drivers= \
+            -Dvulkan-drivers= \
+            -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
+            -Dplatforms= -Dvideo-codecs= \
+            -Dzstd=disabled -Dlz4=disabled \
+            2>&1 | tail -40
+
+      - name: List compiler targets
+        run: |
+          cd mesa
+          meson introspect build --targets \
+            | python3 -c "import json,sys; t=json.load(sys.stdin); [print(x.get('name')) for x in t if 'panfrost' in (x.get('name') or '').lower() or 'pan_' in (x.get('name') or '')]" | sort | head -40
+
+      - name: Build the compiler library
+        run: |
+          cd mesa
+          ninja -C build src/panfrost/compiler/libpanfrost_compiler.a 2>&1 | tail -30 || true
+          ls -l build/src/panfrost/compiler/ || true
+
+      - name: Which compiler files are there
+        run: |
+          cd mesa
+          ls -1 src/panfrost/compiler/valhall 2>/dev/null | head -20
+          ls -1 src/panfrost/compiler/bifrost/valhall 2>/dev/null | head -20
+          ls -1 src/panfrost/clc 2>/dev/null | head -20
