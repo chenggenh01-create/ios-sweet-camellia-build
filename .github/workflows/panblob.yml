@@ -29,7 +29,7 @@ jobs:
             libzstd-dev libexpat1-dev clang glslang-tools spirv-tools
           python3 -m venv ~/venv
           ~/venv/bin/pip install -q --upgrade pip
-          ~/venv/bin/pip install -q "meson>=1.5" ninja
+          ~/venv/bin/pip install -q "meson>=1.5" ninja "mako>=0.8" packaging pyyaml ply
           echo "$HOME/venv/bin" >> $GITHUB_PATH
           ~/venv/bin/meson --version && ~/venv/bin/ninja --version
 
