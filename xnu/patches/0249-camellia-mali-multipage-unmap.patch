@@ -1,0 +1,162 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1398,12 +1398,13 @@
+ #define MALI_PTE_ADDRESS     0x0000fffffffff000ull
+ #define MALI_TRANSCFG_4K     (6u | (20u << 6) | (1u << 24))   /* AArch64 4K walks, uncached */
+ #define MALI_MAPPED_GPU      0x00100000ull
++#define MALI_MAPPED_GPU_B    0x00200000ull
+ 
+ static uint64_t *mali_pt_top;
+ static uint64_t mali_pt_top_phys;
+ static unsigned mali_pt_pages;      /* handed to the GPU's tables; deliberately never freed */
+ 
+-static unsigned mali_job_state;   /* 0 not tried, 1 ran, 2 unchanged, 3 faulted and gpu reset */
++static unsigned mali_job_state;   /* bitmask: 1 identity, 2 map A, 4 map B, 8 slot reused, 0x80 fault */
+ 
+ static void mali_as0_update(uint64_t transtab, uint32_t transcfg);   /* used by the recovery below */
+ 
+@@ -1564,12 +1565,46 @@
+ 	return true;
+ }
+ 
++/*
++ * v33: take a mapping back out again.  A leaf entry left behind would keep
++ * pointing at a physical page after it is freed, which is the same hazard as a
++ * stale job head.  Clearing a mapping is an address-space CHANGE, so unlike a
++ * fresh mapping it needs an explicit update (redwood_mali.c:417-422 makes the
++ * same distinction) -- and switching TRANSCFG back to identity is not an unmap.
++ */
++static bool
++mali_unmap_page(uint64_t gpu)
++{
++	uint64_t *middle, *bottom, *entry;
++
++	if (mali_pt_top == NULL || !(mali_pt_top[(gpu >> 30) & 31] & 1u)) {
++		return false;
++	}
++	middle = (uint64_t *)phystokv(mali_pt_top[(gpu >> 30) & 31] & MALI_PTE_ADDRESS);
++	if (!(middle[(gpu >> 21) & 511] & 1u)) {
++		return false;
++	}
++	bottom = (uint64_t *)phystokv(middle[(gpu >> 21) & 511] & MALI_PTE_ADDRESS);
++	entry = &bottom[(gpu >> 12) & 511];
++	if (*entry == 0) {
++		return false;
++	}
++	*entry = 0;
++	FlushPoC_DcacheRegion((vm_offset_t)entry, sizeof(*entry));
++	mali_pwr(mali_p_gpu, MALI_AS0 + MALI_AS_COMMAND, 1u);     /* update */
++	if (!mali_wait(mali_p_gpu, MALI_AS0 + MALI_AS_STATUS, 1u, 0u, 5000)) {
++		printf("SWEET MALI: unmap update did not settle status=%08x\n",
++		    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_STATUS));
++		return false;
++	}
++	return true;
++}
++
+ static void
+ mali_first_job(uint32_t shader_mask)
+ {
+ 	vm_offset_t page = 0;
+ 	uint64_t phys;
+-	bool mapped = false;
+ 
+ 	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+ 	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+@@ -1577,7 +1612,7 @@
+ 		return;
+ 	}
+ 	phys = kvtophys(page);
+-	printf("SWEET MALI: first job page=%08x phys=%08x%08x mmu_features=%08x\n",
++	printf("SWEET MALI: v33 first job page=%08x phys=%08x%08x mmu_features=%08x\n",
+ 	    (uint32_t)page, (uint32_t)(phys >> 32), (uint32_t)phys,
+ 	    mali_prd(mali_p_gpu, MALI_MMU_FEATURES));
+ 	if (phys == 0 || (phys & (PAGE_SIZE - 1)) != 0) {
+@@ -1585,42 +1620,45 @@
+ 		kmem_free(kernel_map, page, PAGE_SIZE);
+ 		return;
+ 	}
+-	mali_as0_update(0, 2);           /* identity: a GPU address is the physical one */
++
++	/* 1: identity, twice, so the slot is also shown to be reusable. */
++	mali_as0_update(0, 2);
+ 	if (!mali_run_write_job(page, phys, shader_mask, "identity")) {
+-		/* The slot may still hold this page's address: reset before freeing. */
+ 		mali_gpu_recover(shader_mask);
+-		mali_job_state = 3;
++		mali_job_state |= 0x80;          /* identity itself failed */
+ 		kmem_free(kernel_map, page, PAGE_SIZE);
+ 		return;
+ 	}
+-	mali_job_state = 1;
+-
+-	/*
+-	 * The same job again, at a GPU address only the page tables give to this
+-	 * page.  A NON-ZERO address is on purpose: if TRANSCFG did not take effect
+-	 * the GPU is still in identity mode and writes to physical 0x100000
+-	 * instead of our page, so the check fails rather than passing by accident.
+-	 */
++	mali_job_state |= 1;
++	if (mali_run_write_job(page, phys, shader_mask, "identity again")) {
++		mali_job_state |= 8;
++	}
++
++	/* 2 and 4: the same page behind two different GPU addresses. */
+ 	if (mali_map_page(MALI_MAPPED_GPU, phys)) {
+ 		mali_as0_update(mali_pt_top_phys, MALI_TRANSCFG_4K);
+-		if (mali_run_write_job(page, MALI_MAPPED_GPU, shader_mask, "pagetable")) {
+-			mali_job_state = 2;
+-			mapped = true;
+-		} else {
+-			mali_gpu_recover(shader_mask);
+-		}
++		if (mali_run_write_job(page, MALI_MAPPED_GPU, shader_mask, "pagetable A")) {
++			mali_job_state |= 2;
++		}
++		if (mali_map_page(MALI_MAPPED_GPU_B, phys) &&
++		    mali_run_write_job(page, MALI_MAPPED_GPU_B, shader_mask, "pagetable B")) {
++			mali_job_state |= 4;
++		}
++		/* Both mappings go before the page does. */
++		(void)mali_unmap_page(MALI_MAPPED_GPU_B);
++		(void)mali_unmap_page(MALI_MAPPED_GPU);
+ 	} else {
+ 		printf("SWEET MALI: no memory for the GPU page tables\n");
+ 	}
++
+ 	/*
+-	 * Back to identity before the page goes away.  The three table pages stay
+-	 * allocated (a bounded leak by design); what matters is that AS0 no longer
+-	 * points at the page that is freed below.
++	 * Back to identity before freeing: the mappings above are gone and the
++	 * table pages stay allocated (three pages, a bounded leak by design).
+ 	 */
+ 	mali_as0_update(0, 2);
+-	printf("SWEET MALI: first job state=%d mapped=%d pt_pages=%u top=%08x%08x\n",
+-	    (int)mali_job_state, mapped ? 1 : 0, mali_pt_pages,
+-	    (uint32_t)(mali_pt_top_phys >> 32), (uint32_t)mali_pt_top_phys);
++	printf("SWEET MALI: v33 first job state=%x pt_pages=%u top=%08x%08x\n",
++	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
++	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+ }
+ 
+@@ -1652,7 +1690,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v32 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v33 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -1715,7 +1753,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v32");
++		mali_bg3d_gate("v33");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
