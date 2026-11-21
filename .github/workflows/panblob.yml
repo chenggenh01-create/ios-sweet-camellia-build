@@ -67,6 +67,12 @@ jobs:
         run: |
           cd mesa
           sed -i "s/dependency('LLVMSPIRVLib', required : true, version : _llvmspirvlib_version)/dependency('LLVMSPIRVLib', required : false)/" meson.build
+          # Enabling the panfrost tools also turns on Mesa's OpenCL (CLC) build,
+          # which drags in LLVM/clang libraries that have nothing to do with
+          # shader compilation for the G57.  Force those branches off; only the
+          # panfrost compiler is built here.
+          sed -i "s/^if with_clc$/if false and with_clc/" meson.build
+          grep -n "if false and with_clc" meson.build | head -5
           grep -n "LLVMSPIRVLib" meson.build | head -3
 
       - name: Configure
@@ -75,7 +81,7 @@ jobs:
           meson setup build \
             -Dtools=panfrost \
             -Dpanfrost-rust=false \
-            -Dmesa-clc=disabled \
+
             -Dbuild-tests=false \
             -Dgallium-drivers= \
             -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
