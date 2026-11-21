@@ -39,13 +39,21 @@ jobs:
             https://gitlab.freedesktop.org/mesa/mesa.git mesa
           cd mesa && git log -1 --oneline
 
+      # LLVMSPIRVLib (SPIRV-LLVM-Translator) is only needed by Mesa's OpenCL CLC
+      # compiler, which this pipeline does not use; Ubuntu does not package it and
+      # building it from source would have to match the LLVM version exactly.
+      # Making the dependency optional lets the panfrost compiler build on its own.
+      - name: Make LLVMSPIRVLib optional
+        run: |
+          cd mesa
+          sed -i "s/dependency('LLVMSPIRVLib', required : true, version : _llvmspirvlib_version)/dependency('LLVMSPIRVLib', required : false)/" meson.build
+          grep -n "LLVMSPIRVLib" meson.build | head -3
+
       - name: Configure
         run: |
           cd mesa
           meson setup build \
             -Dtools=panfrost \
-            -Dprecomp-compiler=enabled \
-            -Dvulkan-drivers=panfrost \
             -Dbuild-tests=false \
             -Dgallium-drivers= \
             -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
