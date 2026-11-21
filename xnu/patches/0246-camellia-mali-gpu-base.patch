@@ -1,0 +1,68 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1348,14 +1348,19 @@
+ 	mali_p_infra = ml_io_map(0x10001000u, 0x1000);
+ 	mali_p_infra_pdn = ml_io_map(0x10215000u, 0x1000);
+ 	mali_p_mfgcfg = ml_io_map(0x13fbf000u, 0x1000);
+-	mali_p_gpu = ml_io_map(0x13040000u, 0x4000);
++	/* v30: the GPU aperture is 0x13000000, not the 0x13040000 copied over from
++	 * the MT6768 reference.  vendor mt6833.dts: `mali: mali@13000000` with
++	 * `reg = <0 0x13000000 0 0x4000>` and compatible "arm,mali-valhall".
++	 * Reading the wrong window is why GPU_ID came back 0 with every power bit
++	 * already correct. */
++	mali_p_gpu = ml_io_map(0x13000000u, 0x4000);
+ 	if (!mali_p_spm || !mali_p_infra || !mali_p_infra_pdn || !mali_p_mfgcfg || !mali_p_gpu) {
+ 		printf("SWEET MALI: power map failed\n");
+ 		return;
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v29 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v30 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -1418,7 +1423,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v29");
++		mali_bg3d_gate("v30");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
+@@ -1498,16 +1503,23 @@
+ 		return;
+ 	}
+ 	{
+-		uint16_t vgpu_con0 = 0, vgpu_vosel = 0, vgpu_dbg1 = 0, vgpu_elr0 = 0;
+-		bool ok1 = key_pmic_read(0x1588, &vgpu_con0);
+-		bool ok2 = key_pmic_read(0x15a6, &vgpu_vosel);
+-		bool ok3 = key_pmic_read(0x15a8, &vgpu_dbg1);
+-		bool ok4 = key_pmic_read(0x15ac, &vgpu_elr0);
+-		/* v28: 0x15a6 is VGPU11 DBG0 (DA_VOSEL), 0x15a8 DBG1 (DA_EN) and
+-		 * 0x15ac ELR0 (RG_VOSEL); the old 0x1bbc read was LDO_VRF12_MON, not
+-		 * a GPU rail at all, so it is gone. */
+-		printf("SWEET MALI: PMIC VGPU11 con0=%04x(%d) dbg0=%04x(%d) dbg1=%04x(%d) elr0=%04x(%d)\n",
+-		    vgpu_con0, ok1, vgpu_vosel, ok2, vgpu_dbg1, ok3, vgpu_elr0, ok4);
++		uint16_t vp1_con = 0, vp1_vosel = 0, vp1_en = 0, vp1_elr = 0;
++		uint16_t vsm_con = 0, vsm_en = 0, vsm_vosel = 0;
++		bool a = key_pmic_read(0x1708, &vp1_con);     /* BUCK_VPROC1_CON0, EN bit0 */
++		bool b = key_pmic_read(0x1726, &vp1_vosel);   /* DBG0, DA_VOSEL bits 0-6 */
++		bool c = key_pmic_read(0x1728, &vp1_en);      /* DBG1, DA_EN */
++		bool e = key_pmic_read(0x172e, &vp1_elr);     /* ELR0, RG_VOSEL */
++		bool f = key_pmic_read(0x1f2c, &vsm_con);     /* LDO_VSRAM_MD_CON0, EN bit0 */
++		bool g = key_pmic_read(0x1f2e, &vsm_en);      /* MON, DA_B_EN */
++		bool h = key_pmic_read(0x1f32, &vsm_vosel);   /* VOSEL1, DA_VOSEL bits 8+ */
++		/* v30: vendor mt6833.dts maps the GPU rails to the VPROC1 buck and the
++		 * VSRAM_MD ldo (_vgpu-supply / _vsram_gpu-supply), so VGPU11 is not the
++		 * GPU rail on this board and the old reads were looking at the wrong
++		 * supply the whole time. */
++		printf("SWEET MALI: PMIC VPROC1 con0=%04x(%d) dbg0=%04x(%d) dbg1=%04x(%d) elr0=%04x(%d)\n",
++		    vp1_con, a, vp1_vosel, b, vp1_en, c, vp1_elr, e);
++		printf("SWEET MALI: PMIC VSRAM_MD con0=%04x(%d) mon=%04x(%d) vosel1=%04x(%d)\n",
++		    vsm_con, f, vsm_en, g, vsm_vosel, h);
+ 	}
+ 	printf("SWEET MALI: status SPM=%08x/%08x MFGCFG20=%08x GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n",
+ 	    mali_prd(mali_p_spm, 0x16C), mali_prd(mali_p_spm, 0x170),
