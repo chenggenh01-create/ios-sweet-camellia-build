@@ -26,7 +26,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ninja-build python3-pip python3-venv python3-mako python3-yaml \
             python3-ply libdrm-dev pkg-config bison flex zlib1g-dev \
-            libzstd-dev libexpat1-dev libudev-dev libelf-dev cmake clang glslang-tools spirv-tools
+            libzstd-dev libexpat1-dev libudev-dev libelf-dev cmake clang \
+            glslang-tools spirv-tools \
+            libwayland-dev wayland-protocols \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev \
+            libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev libxcb-shm0-dev \
+            libxcb-glx0-dev libxext-dev libxrandr-dev libxxf86vm-dev \
+            libxshmfence-dev libdrm-dev
           python3 -m venv ~/venv
           ~/venv/bin/pip install -q --upgrade pip
           ~/venv/bin/pip install -q "meson>=1.5" ninja "mako>=0.8" packaging pyyaml ply setuptools
