@@ -91,10 +91,30 @@ jobs:
 
       - name: Build panfrost_compile
         run: |
+          mkdir -p diag
           cd mesa
-          ninja -C build src/panfrost/clc/panfrost_compile
+          ninja -C build src/panfrost/clc/panfrost_compile 2>&1 | tee ../diag/ninja.txt | tail -30
           ls -l build/src/panfrost/clc/panfrost_compile
           ./build/src/panfrost/clc/panfrost_compile || true
+
+      # The run log is ~6 MB and this network keeps dropping it, so keep the
+      # failure reason in a few-KB artifact instead.
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p diag
+          if [ -f mesa/build/meson-logs/meson-log.txt ]; then
+            tail -120 mesa/build/meson-logs/meson-log.txt > diag/meson-log-tail.txt
+          fi
+          grep -n -E "ERROR|error:" mesa/build/meson-logs/meson-log.txt 2>/dev/null | tail -30 > diag/errors.txt || true
+          wc -c diag/* || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panblob-diag
+          path: diag/
+          if-no-files-found: warn
 
       - name: Compile a copy kernel to v9 machine code
         run: |
