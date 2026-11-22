@@ -1,0 +1,67 @@
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -255,6 +255,18 @@ AppleCLCD::present(const uint8_t *rec)
+ 	static int sweet_chunk = -1;
+ 	uint32_t mask = get32(rec, 0x104);
+ 	uintptr_t dst = sweet_alt_pixels ? sweet_alt_pixels : fPixels;
++	/*
++	 * A layer that is re-presented with the same surface and the same source
++	 * and destination rectangles has not changed since the previous frame
++	 * (backboardd re-submits unchanged layers every swap, the wallpaper being
++	 * the obvious one), so copying it again only burns memory bandwidth.
++	 * Boot-arg sweetfbskipstatic=1 turns the check on.
++	 */
++	static int sweet_skip_static = -1;
++	static struct {
++		uint32_t id;
++		int32_t sx, sy, dx, dy, w, h;
++	} sweet_last[SWEET_FB_LAYERS];
+ 	int32_t win_start = 0, win_len = 0;
+ 
+ 	if (sweet_nopresent < 0) {
+@@ -270,6 +281,12 @@ AppleCLCD::present(const uint8_t *rec)
+ 		PE_parse_boot_argn("sweetpresentchunk", &value, sizeof(value));
+ 		sweet_chunk = value;
+ 	}
++	if (sweet_skip_static < 0) {
++		int value = 0;
++
++		PE_parse_boot_argn("sweetfbskipstatic", &value, sizeof(value));
++		sweet_skip_static = value;
++	}
+ 	if (sweet_window > 0) {
+ 		win_start = (int32_t)(sweet_window_pos % (uint32_t)fHeight);
+ 		win_len = sweet_window;
+@@ -380,6 +397,27 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (h > (int32_t)fHeight - dy) {
+ 			h = (int32_t)fHeight - dy;
+ 		}
++		/*
++		 * Skip layers whose id and rectangles are identical to the previous
++		 * presentation.  Only safe without the rotating window: with a window
++		 * the same layer must be copied again on later rows.
++		 */
++		if (sweet_skip_static && win_len == 0) {
++			if (sweet_last[layer].id == id &&
++			    sweet_last[layer].sx == sx && sweet_last[layer].sy == sy &&
++			    sweet_last[layer].dx == dx && sweet_last[layer].dy == dy &&
++			    sweet_last[layer].w == w && sweet_last[layer].h == h) {
++				s->release();
++				continue;
++			}
++			sweet_last[layer].id = id;
++			sweet_last[layer].sx = sx;
++			sweet_last[layer].sy = sy;
++			sweet_last[layer].dx = dx;
++			sweet_last[layer].dy = dy;
++			sweet_last[layer].w = w;
++			sweet_last[layer].h = h;
++		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+ 		    (uint64_t)(sx + w) * 4;
+ 		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
