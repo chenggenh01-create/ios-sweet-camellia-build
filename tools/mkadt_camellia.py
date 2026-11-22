@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Minimal Apple Device Tree for camellia (Redmi Note 10 5G, MT6833).
 
 Ported from third_party/ios-sweet/tools/mkadt.py (sweet/SM7150) with the

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """v52 = v50 + the two GPU register accessors the IOKit accelerator needs.
 

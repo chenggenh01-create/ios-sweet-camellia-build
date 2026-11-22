@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Generate sweet_touch_mtk_v46.c: the v45 kernel plus the first compute job.
 

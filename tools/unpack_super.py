@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """unpack_super.py - 鎷?Android sparse super.img 閲岀殑鍔ㄦ€佸垎鍖恒€?
 鐢ㄦ硶锛?  python unpack_super.py raw   super.img super.raw      # sparse -> raw

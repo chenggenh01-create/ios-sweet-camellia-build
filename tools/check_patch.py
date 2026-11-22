@@ -63,7 +63,17 @@ def check(path):
         want_old, want_new = int(m.group(2)), int(m.group(4))
         i += 1
         got_old = got_new = 0
-        while i < len(lines) and not lines[i].startswith('@@') and not lines[i].startswith('diff --git'):
+        while (i < len(lines)
+               and not lines[i].startswith('@@')
+               and not lines[i].startswith('diff --git')
+               and not lines[i].startswith('--- ')
+               and not lines[i].startswith('+++ ')):
+            # git format-patch trailers must not be counted as patch content
+            if re.match(r'^--\s*$', lines[i]) or re.match(r'^\d+\.\d+\.\d+$', lines[i]):
+                i += 1
+                while i < len(lines) and not lines[i].startswith(('@@', 'diff --git')):
+                    i += 1
+                break
             if lines[i].startswith('+'):
                 got_new += 1
             elif lines[i].startswith('-'):
