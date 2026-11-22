@@ -30,7 +30,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	    ok, (int)MALI_COPY_ELEMS,
  	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
  	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS));
-@@ -2426,13 +2430,30 @@
+@@ -2426,10 +2430,27 @@
  	 */
  	mali_as0_update(0, 2);
  	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
@@ -39,9 +39,8 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
  	    (uint32_t)mali_pt_top_phys);
  	kmem_free(kernel_map, page, PAGE_SIZE);
- }
- 
- static void
++}
++
 +/* Used by iokit/Kernel/arm/SweetFramebuffer.cpp (Metal accelerator); they
 + * keep the IOKit side free of MFG/SPM/PMIC sequencing. */
 +int
@@ -57,11 +56,9 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +		return 0;
 +	}
 +	return mali_prd(mali_p_gpu, off);
-+}
-+
- sweet_mali_power(void)
- {
- 	int enabled = 0;
+ }
+ 
+ static void
 @@ -2460,7 +2481,7 @@
  	}
  	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
