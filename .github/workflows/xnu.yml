@@ -105,7 +105,29 @@ jobs:
         working-directory: dxb
         env:
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
-        run: bash build.sh
+        run: |
+          set -o pipefail
+          bash build.sh 2>&1 | tee /tmp/build.log
+          echo "build.sh exit=$?"
+
+      # A failed XNU build used to mean downloading the 6 MB run log; keep the
+      # error lines and the tail in a few-KB artifact instead.
+      - name: Collect build diagnostics
+        if: always()
+        run: |
+          mkdir -p dump
+          if [ -f /tmp/build.log ]; then
+            tail -120 /tmp/build.log > dump/build-tail.txt
+            grep -n -E "error:|Error |FAILED|Skipping patch|Undefined symbols" /tmp/build.log | tail -80 > dump/build-errors.txt || true
+          fi
+          wc -c dump/* || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-diag
+          path: dump/
+          if-no-files-found: warn
 
       # Dump the presentation path out of the tree that was actually built, so a
       # patch against it is written against real context instead of a guess.
