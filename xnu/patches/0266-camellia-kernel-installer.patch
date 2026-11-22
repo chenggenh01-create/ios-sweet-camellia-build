@@ -7,8 +7,6 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  #include <pexpert/pexpert.h>
 +#include <sys/namei.h>
 +#include <sys/vnode.h>
-+#include <sys/vnode_attr.h>
-+#include <sys/kauth.h>
 +#include <sys/fcntl.h>
 +#include <sys/uio.h>
 +
@@ -17,10 +15,11 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 + * v50: write a file into the mounted iOS root from the kernel.
 + *
 + * The BSD layer does not export vn_open(); open1() uses vn_open_auth(), which is
-+ * in the kernel image, so declare it here.  This is the prerequisite for
-+ * installing our own userland (Metal front-end and Vulkan driver) later.
++ * linked into the kernel, so it is declared here with the same signature.
++ * This is the prerequisite for installing our own userland (Vulkan driver and
++ * Metal front-end) into the root later.
 + */
-+extern int vn_open_auth(struct nameidata *ndp, int *flagsp,
++extern int vn_open_auth(struct nameidata *ndp, int *fmodep,
 +    struct vnode_attr *vap, vnode_t authvp);
 +
 +static int
@@ -29,25 +28,26 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	struct nameidata nd;
 +	struct vnode_attr va;
 +	vfs_context_t ctx = vfs_context_current();
-+	int flags = O_CREAT | O_TRUNC | FWRITE;
++	int uflags = O_WRONLY | O_CREAT | O_TRUNC;
++	int flags = FFLAGS(uflags);
 +	int resid = 0, error;
 +
 +	bzero(&nd, sizeof(nd));
 +	VATTR_INIT(&va);
-+	VATTR_SET(&va, va_type, VREG);
 +	VATTR_SET(&va, va_mode, mode);
 +
-+	NDINIT(&nd, CREATE, 0, 0, UIO_SYSSPACE, path, ctx);
-+	error = vn_open_auth(&nd, &flags, &va, NULL);
++	NDINIT(&nd, LOOKUP, OP_OPEN, FOLLOW, UIO_SYSSPACE, path, ctx);
++	error = vn_open_auth(&nd, &flags, &va, NULLVP);
 +	if (error != 0) {
-+		printf("SWEET INSTALL: vn_open_auth(%s) failed %d\n", path, error);
++		printf("SWEET INSTALL: open(%s) failed %d\n", path, error);
 +		return error;
 +	}
 +	error = vn_rdwr(UIO_WRITE, nd.ni_vp, (caddr_t)(uintptr_t)data, (int)len, 0,
-+	    UIO_SYSSPACE, 0, kauth_cred_get(), &resid, current_proc());
++	    UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &resid,
++	    vfs_context_proc(ctx));
 +	(void)vn_close(nd.ni_vp, flags, ctx);
 +	if (error != 0) {
-+		printf("SWEET INSTALL: vn_rdwr(%s) failed %d\n", path, error);
++		printf("SWEET INSTALL: write(%s) failed %d\n", path, error);
 +	}
 +	return error;
 +}
