@@ -49,6 +49,7 @@ tools/              打包 / 刷机 / 分析 / 生码工具
   mk_v5x_*.py            逐版本生成 bsd/dev/sweet_touch_mtk.c 并出补丁
 touch/              触摸相关：驱动快照、NT36672C 固件、厂商参考源码
 docs/               构建/刷机/交班/GPU 方案文档
+  USERDATA_方案.md  iOS root 放 userdata 的构建/刷写/恢复/日志方案（破坏性操作边界）
   evidence/         上机记录与固件证据
   source/           生成的驱动源码快照（参考用，真正来源是 xnu/patches）
 shim/               boot.img 里的 loader 源码
@@ -147,6 +148,7 @@ fastboot reboot
 ## 文档
 
 - [`docs/41_交接_2026-11-22_GPU假服务打通与下一步.md`](docs/41_交接_2026-11-22_GPU假服务打通与下一步.md)（**最新**：GPU 假服务成果 + 下一步 4 个部件 + 踩坑）
+- [`docs/USERDATA_方案.md`](docs/USERDATA_方案.md)（iOS root 放 userdata：构建/刷写/恢复/日志）
 - [`docs/40_GPU方案_参考项目对照与移植计划.md`](docs/40_GPU方案_参考项目对照与移植计划.md)（参考项目对照：viva / io-s-viva / hakios / HelioDarwin / Ken-u）
 - [`docs/33_路线_实验机A_2026-11-14.md`](docs/33_路线_实验机A_2026-11-14.md)（路线与验收）
 - [`docs/BUILD.md`](docs/BUILD.md)
