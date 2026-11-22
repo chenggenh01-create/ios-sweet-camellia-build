@@ -1,0 +1,99 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1233,6 +1233,10 @@
+  * ------------------------------------------------------------------ */
+ static vm_offset_t mali_p_spm, mali_p_infra, mali_p_infra_pdn, mali_p_mfgcfg, mali_p_gpu;
+ 
++/* Set once the GPU is out of reset, so the IOKit side knows when
++ * reading its registers is safe. */
++static int mali_powered;
++
+ static inline uint32_t
+ mali_prd(vm_offset_t base, uint32_t off)
+ {
+@@ -2190,7 +2194,7 @@
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+ 	    kmem_alloc(kernel_map, &tlspage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("SWEET MALI: v50 no memory for the compute test\n");
++		printf("SWEET MALI: v52 no memory for the compute test\n");
+ 		return;
+ 	}
+ 
+@@ -2284,7 +2288,7 @@
+ 	}
+ 	mali_compute_ok = (unsigned)ok;
+ 	mali_compute_words = (unsigned)MALI_COPY_ELEMS;
+-	printf("SWEET MALI: v50 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
++	printf("SWEET MALI: v52 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
+ 	    ok, (int)MALI_COPY_ELEMS,
+ 	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
+ 	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS));
+@@ -2426,13 +2430,30 @@
+ 	 */
+ 	mali_as0_update(0, 2);
+ 	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
+-	printf("SWEET MALI: v50 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v52 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+ }
+ 
+ static void
++/* Used by iokit/Kernel/arm/SweetFramebuffer.cpp (Metal accelerator); they
++ * keep the IOKit side free of MFG/SPM/PMIC sequencing. */
++int
++sweet_gpu_is_powered(void)
++{
++	return mali_powered;
++}
++
++uint32_t
++sweet_gpu_reg_read(uint32_t off)
++{
++	if (!mali_powered || mali_p_gpu == 0) {
++		return 0;
++	}
++	return mali_prd(mali_p_gpu, off);
++}
++
+ sweet_mali_power(void)
+ {
+ 	int enabled = 0;
+@@ -2460,7 +2481,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v50 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v52 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -2523,7 +2544,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v50");
++		mali_bg3d_gate("v52");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
+@@ -2591,6 +2612,7 @@
+ 	    mali_prd(mali_p_gpu, 0x150), mali_prd(mali_p_gpu, 0x160));
+ 	/* v31: ask the GPU to write a value into a page of ours. */
+ 	mali_first_job(mali_prd(mali_p_gpu, 0x100));
++	mali_powered = 1;
+ 	printf("SWEET MALI: power-on done\n");
+ 	sweet_install_probe();
+ 	return;
+@@ -2621,7 +2643,7 @@
+ 		 * supply the whole time. */
+ 		printf("SWEET MALI: BG batches=%u jobs=%u ok=%u bad=%u\n",
+ 	    mali_bg_batches, mali_bg_jobs, mali_bg_ok, mali_bg_bad);
+-	printf("SWEET MALI: v50 compute copy %u/%u words ok\n",
++	printf("SWEET MALI: v52 compute copy %u/%u words ok\n",
+ 	    mali_compute_ok, mali_compute_words);
+ 	printf("SWEET MALI: PMIC VPROC1 con0=%04x(%d) dbg0=%04x(%d) dbg1=%04x(%d) elr0=%04x(%d)\n",
+ 		    vp1_con, a, vp1_vosel, b, vp1_en, c, vp1_elr, e);

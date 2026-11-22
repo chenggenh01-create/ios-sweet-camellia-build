@@ -1,9 +1,19 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -623,2 +623,43 @@
+@@ -623,2 +623,288 @@
  }
-+
+ #endif /* SWEET */
++﻿
++/*
++ * A Metal-capable accelerator.
++ *
++ * iOS finds a GPU with IOServiceMatching("IOAcceleratorES"); it then reads
++ * MetalPluginName (a bundle under /System/Library/Extensions) and
++ * MetalPluginClassName (a _MTLDevice subclass inside it).  The GPU itself is
++ * powered and driven from bsd/dev/sweet_touch_mtk.c; this service only forwards
++ * queries about it, so the IOKit side carries no MFG/SPM/PMIC sequencing.
++ */
 +class IOAcceleratorES : public IOService {
 +	OSDeclareDefaultStructors(IOAcceleratorES);
 +public:
@@ -11,14 +21,251 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +};
 +OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
 +
++/* Numbering follows Nik300/viva-gpu's viva_gpu_uapi.h so that its userspace
++ * stack can be pointed at this kernel later without renumbering. */
++enum {
++	kSweetGPUGetVersion = 0,
++	kSweetGPUGetParam,
++	kSweetGPUSelectorCount = 23,
++};
++
++struct sweet_gpu_version {
++	uint32_t major, minor;
++	uint32_t gpu_id;
++	uint32_t page_size;
++	char     name[32];
++};
++
++enum {
++	kSweetGPUParamProdId = 0, kSweetGPUParamRevision,
++	kSweetGPUParamShaderPresent, kSweetGPUParamTilerPresent,
++	kSweetGPUParamL2Present, kSweetGPUParamStackPresent,
++	kSweetGPUParamAsPresent, kSweetGPUParamJsPresent,
++	kSweetGPUParamL2Features, kSweetGPUParamCoreFeatures,
++	kSweetGPUParamTilerFeatures, kSweetGPUParamMemFeatures,
++	kSweetGPUParamMmuFeatures, kSweetGPUParamThreadFeatures,
++	kSweetGPUParamMaxThreads, kSweetGPUParamMaxWorkgroup,
++	kSweetGPUParamMaxBarrier, kSweetGPUParamCoherencyFeatures,
++	kSweetGPUParamTexture0, kSweetGPUParamTexture1, kSweetGPUParamTexture2,
++	kSweetGPUParamTexture3, kSweetGPUParamJsFeatures0, /* .. +15 */
++	kSweetGPUParamNrCoreGroups = kSweetGPUParamJsFeatures0 + 16,
++	kSweetGPUParamThreadTlsAlloc, kSweetGPUParamAfbcFeatures,
++};
++
++struct sweet_gpu_get_param {
++	uint32_t param, pad;
++	uint64_t value;
++};
++
++/* Provided by bsd/dev/sweet_touch_mtk.c. */
++extern "C" int      sweet_gpu_is_powered(void);
++extern "C" uint32_t sweet_gpu_reg_read(uint32_t off);
++
++#define kSweetGPUGpuId              0x000
++#define kSweetGPUL2Features         0x004
++#define kSweetGPUCoreFeatures       0x008
++#define kSweetGPUTilerFeatures      0x00c
++#define kSweetGPUMemFeatures        0x010
++#define kSweetGPUMmuFeatures        0x014
++#define kSweetGPUAsPresent          0x018
++#define kSweetGPUJsPresent          0x01c
++#define kSweetGPUAfbcFeatures       0x04c
++#define kSweetGPUMaxThreads         0x0a0
++#define kSweetGPUMaxWorkgroup       0x0a4
++#define kSweetGPUMaxBarrier         0x0a8
++#define kSweetGPUThreadFeatures     0x0ac
++#define kSweetGPUShaderPresent      0x100
++#define kSweetGPUTilerPresent       0x110
++#define kSweetGPUL2Present          0x120
++#define kSweetGPUStackPresent       0xe00
++#define kSweetGPUCoherencyFeatures  0x300
++#define kSweetGPUTlsAlloc           0x310
++
++class SweetGPUUserClient : public IOUserClient
++{
++	OSDeclareDefaultStructors(SweetGPUUserClient);
++
++protected:
++	task_t      fTask;
++	IOService  *fGPU;
++
++	IOReturn getVersion(sweet_gpu_version *out);
++	IOReturn getParam(sweet_gpu_get_param *arg);
++
++public:
++	virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(SweetGPUUserClient, IOUserClient);
++
++bool
++SweetGPUUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	fTask = owningTask;
++	fGPU = NULL;
++	return true;
++}
++
++bool
++SweetGPUUserClient::start(IOService *provider)
++{
++	if (!IOUserClient::start(provider)) {
++		return false;
++	}
++	fGPU = provider;
++	IOLog("SWEET GPU: client opened (powered=%d gpu_id=%08x)\n",
++	    sweet_gpu_is_powered(), sweet_gpu_reg_read(kSweetGPUGpuId));
++	return true;
++}
++
++IOReturn
++SweetGPUUserClient::clientClose(void)
++{
++	IOLog("SWEET GPU: client closed\n");
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetGPUUserClient::getVersion(sweet_gpu_version *out)
++{
++	bzero(out, sizeof(*out));
++	out->major = 0;
++	out->minor = 0;
++	out->gpu_id = sweet_gpu_reg_read(kSweetGPUGpuId);
++	out->page_size = 16384;
++	strlcpy(out->name, "Mali-G57 MC2", sizeof(out->name));
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetGPUUserClient::getParam(sweet_gpu_get_param *arg)
++{
++	uint32_t gpuId = sweet_gpu_reg_read(kSweetGPUGpuId);
++	uint32_t v = 0;
++
++	switch (arg->param) {
++	case kSweetGPUParamProdId:
++		v = gpuId >> 16;
++		break;
++	case kSweetGPUParamRevision:
++		v = gpuId & 0xffffu;
++		break;
++	case kSweetGPUParamShaderPresent:
++		v = sweet_gpu_reg_read(kSweetGPUShaderPresent) != 0;
++		break;
++	case kSweetGPUParamTilerPresent:
++		v = sweet_gpu_reg_read(kSweetGPUTilerPresent) != 0;
++		break;
++	case kSweetGPUParamL2Present:
++		v = sweet_gpu_reg_read(kSweetGPUL2Present) != 0;
++		break;
++	case kSweetGPUParamStackPresent:
++		v = sweet_gpu_reg_read(kSweetGPUStackPresent) != 0;
++		break;
++	case kSweetGPUParamAsPresent:
++		v = sweet_gpu_reg_read(kSweetGPUAsPresent);
++		break;
++	case kSweetGPUParamJsPresent:
++		v = sweet_gpu_reg_read(kSweetGPUJsPresent);
++		break;
++	case kSweetGPUParamL2Features:
++		v = sweet_gpu_reg_read(kSweetGPUL2Features);
++		break;
++	case kSweetGPUParamCoreFeatures:
++		v = sweet_gpu_reg_read(kSweetGPUCoreFeatures);
++		break;
++	case kSweetGPUParamTilerFeatures:
++		v = sweet_gpu_reg_read(kSweetGPUTilerFeatures);
++		break;
++	case kSweetGPUParamMemFeatures:
++		v = sweet_gpu_reg_read(kSweetGPUMemFeatures);
++		break;
++	case kSweetGPUParamMmuFeatures:
++		v = sweet_gpu_reg_read(kSweetGPUMmuFeatures);
++		break;
++	case kSweetGPUParamThreadFeatures:
++		v = sweet_gpu_reg_read(kSweetGPUThreadFeatures);
++		break;
++	case kSweetGPUParamMaxThreads:
++		v = sweet_gpu_reg_read(kSweetGPUMaxThreads);
++		break;
++	case kSweetGPUParamMaxWorkgroup:
++		v = sweet_gpu_reg_read(kSweetGPUMaxWorkgroup);
++		break;
++	case kSweetGPUParamMaxBarrier:
++		v = sweet_gpu_reg_read(kSweetGPUMaxBarrier);
++		break;
++	case kSweetGPUParamCoherencyFeatures:
++		v = sweet_gpu_reg_read(kSweetGPUCoherencyFeatures);
++		break;
++	case kSweetGPUParamThreadTlsAlloc:
++		v = sweet_gpu_reg_read(kSweetGPUTlsAlloc);
++		break;
++	case kSweetGPUParamAfbcFeatures:
++		v = sweet_gpu_reg_read(kSweetGPUAfbcFeatures);
++		break;
++	default:
++		return kIOReturnUnsupported;
++	}
++	arg->value = v;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference)
++{
++	IOReturn ret = kIOReturnUnsupported;
++
++	if (selector == kSweetGPUGetVersion) {
++		if (args->structureOutput != NULL &&
++		    args->structureOutputSize >= sizeof(sweet_gpu_version)) {
++			ret = getVersion((sweet_gpu_version *)args->structureOutput);
++			if (ret == kIOReturnSuccess) {
++				args->structureOutputSize = sizeof(sweet_gpu_version);
++			}
++		} else {
++			ret = kIOReturnBadArgument;
++		}
++	} else if (selector == kSweetGPUGetParam) {
++		if (args->structureInput != NULL &&
++		    args->structureInputSize >= sizeof(sweet_gpu_get_param) &&
++		    args->structureOutput != NULL &&
++		    args->structureOutputSize >= sizeof(sweet_gpu_get_param)) {
++			sweet_gpu_get_param arg;
++			bcopy(args->structureInput, &arg, sizeof(arg));
++			ret = getParam(&arg);
++			if (ret == kIOReturnSuccess) {
++				bcopy(&arg, args->structureOutput, sizeof(arg));
++				args->structureOutputSize = sizeof(arg);
++			}
++		} else {
++			ret = kIOReturnBadArgument;
++		}
++	} else {
++		/* BO/VM/submit/sync stay reserved with viva-gpu's numbering. */
++	}
++	return ret;
++}
++
 +bool
 +IOAcceleratorES::start(IOService *provider)
 +{
 +	if (!IOService::start(provider)) {
 +		return false;
 +	}
-+	setProperty("IOUserClientClass", "IOAcceleratorESUserClient");
-+	IOLog("SWEET GPU: IOAcceleratorES started\n");
++	/* Metal reads these two properties to find our plug-in. */
++	setProperty("MetalPluginName", "SweetMTLDriver");
++	setProperty("MetalPluginClassName", "VMDevice");
++	setProperty("IOUserClientClass", "SweetGPUUserClient");
++	IOLog("SWEET GPU: IOAcceleratorES started (MetalPluginName SweetMTLDriver)\n");
 +	registerService();
 +	return true;
 +}
@@ -43,8 +290,6 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +		}
 +	}
 +}
-+
- #endif /* SWEET */
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
