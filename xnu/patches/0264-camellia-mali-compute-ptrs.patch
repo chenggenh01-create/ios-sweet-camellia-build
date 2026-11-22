@@ -1,0 +1,110 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -2093,8 +2093,10 @@
+ static void
+ mali_compute_copy(uint32_t shader_mask)
+ {
+-	vm_offset_t srcpage = 0, dstpage = 0, isapage = 0, faupage = 0, descpage = 0, rsdpage = 0;
+-	uint64_t src_phys, dst_phys, shader_phys, job_phys, fau_phys, rsd_phys;
++	vm_offset_t srcpage = 0, dstpage = 0, isapage = 0, faupage = 0, descpage = 0, rsdpage = 0,
++	    rsrpage = 0, tlspage = 0;
++	uint64_t src_phys, dst_phys, shader_phys, job_phys, fau_phys, rsd_phys,
++	    rsr_phys, tls_phys;
+ 	volatile uint32_t *j, *rsd;
+ 	volatile uint64_t *fau;
+ 	int i, ok = 0;
+@@ -2110,8 +2112,12 @@
+ 	    kmem_alloc(kernel_map, &descpage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+ 	    kmem_alloc(kernel_map, &rsdpage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    kmem_alloc(kernel_map, &rsrpage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    kmem_alloc(kernel_map, &tlspage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("SWEET MALI: v47 no memory for the compute test\n");
++		printf("SWEET MALI: v48 no memory for the compute test\n");
+ 		return;
+ 	}
+ 
+@@ -2125,6 +2131,8 @@
+ 	dst_phys = kvtophys(dstpage);
+ 	shader_phys = kvtophys(isapage);
+ 	rsd_phys = kvtophys(rsdpage);
++	rsr_phys = kvtophys(rsrpage);
++	tls_phys = kvtophys(tlspage);
+ 	fau_phys = kvtophys(faupage);
+ 	job_phys = kvtophys(descpage);          /* own page: 128-byte aligned */
+ 
+@@ -2167,12 +2175,12 @@
+ 	j[15] = 0;
+ 	j[16] = 0;                              /* Shader Environment: attr offset */
+ 	j[17] = MALI_FAU_WORDS;                 /* FAU count */
+-	j[24] = 0;
+-	j[25] = 0;                              /* resources */
++	j[24] = (uint32_t)rsr_phys;
++	j[25] = (uint32_t)(rsr_phys >> 32);   /* resources table */
+ 	j[26] = (uint32_t)rsd_phys;
+ 	j[27] = (uint32_t)(rsd_phys >> 32);     /* Shader Program (RSD) address */
+-	j[28] = 0;
+-	j[29] = 0;                              /* thread storage */
++	j[28] = (uint32_t)tls_phys;
++	j[29] = (uint32_t)(tls_phys >> 32);   /* thread storage */
+ 	j[30] = (uint32_t)fau_phys;
+ 	j[31] = (uint32_t)(fau_phys >> 32);     /* FAU address */
+ 
+@@ -2180,6 +2188,8 @@
+ 	FlushPoC_DcacheRegion(faupage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(descpage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(rsdpage, PAGE_SIZE);
++	FlushPoC_DcacheRegion(rsrpage, PAGE_SIZE);
++	FlushPoC_DcacheRegion(tlspage, PAGE_SIZE);
+ 
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_MASK, 0);
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
+@@ -2199,7 +2209,7 @@
+ 			ok++;
+ 		}
+ 	}
+-	printf("SWEET MALI: v47 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
++	printf("SWEET MALI: v48 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
+ 	    ok, (int)MALI_COPY_ELEMS,
+ 	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
+ 	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS));
+@@ -2210,6 +2220,8 @@
+ 	kmem_free(kernel_map, faupage, PAGE_SIZE);
+ 	kmem_free(kernel_map, descpage, PAGE_SIZE);
+ 	kmem_free(kernel_map, rsdpage, PAGE_SIZE);
++	kmem_free(kernel_map, rsrpage, PAGE_SIZE);
++	kmem_free(kernel_map, tlspage, PAGE_SIZE);
+ }
+ 
+ static void
+@@ -2330,7 +2342,7 @@
+ 	 */
+ 	mali_as0_update(0, 2);
+ 	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
+-	printf("SWEET MALI: v47 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v48 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+@@ -2364,7 +2376,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v47 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v48 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -2427,7 +2439,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v47");
++		mali_bg3d_gate("v48");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
