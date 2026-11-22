@@ -125,6 +125,30 @@ jobs:
           wc -c copy.h copy.c
           head -30 copy.h || true
 
+      - name: Disassemble the generated ISA
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import re
+          txt = open('copy.c', encoding='utf-8').read()
+          m = re.search(r'panlib_copy_0_default\[(\d+)\] = \{(.*?)\};', txt, re.S)
+          if not m:
+              raise SystemExit('array not found')
+          words = re.findall(r'0x[0-9a-fA-F]+', m.group(2))
+          with open('copy_isa.bin', 'wb') as f:
+              for w in words:
+                  f.write(int(w, 16).to_bytes(4, 'little'))
+          print('isa words', len(words))
+          PY
+          ls -l copy_isa.bin || true
+          TOOL=$(find mesa/build -type f -perm -u+x -name 'bifrost_compiler' | head -1)
+          echo "disassembler: $TOOL"
+          if [ -n "$TOOL" ] && [ -f copy_isa.bin ]; then
+            "$TOOL" --gpu G57 copy_isa.bin > diag/isa_disasm.txt 2>&1 || \
+            "$TOOL" -g G57 copy_isa.bin > diag/isa_disasm.txt 2>&1 || true
+            head -40 diag/isa_disasm.txt
+          fi
+
       - name: Collect diagnostics
         if: always()
         run: |
@@ -141,6 +165,7 @@ jobs:
           path: |
             copy.spv
             copy.h
+            copy_isa.bin
             copy.c
             copy.d
             diag/
