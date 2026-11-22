@@ -1,0 +1,126 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -2093,9 +2093,9 @@
+ static void
+ mali_compute_copy(uint32_t shader_mask)
+ {
+-	vm_offset_t srcpage = 0, dstpage = 0, isapage = 0, faupage = 0, descpage = 0;
+-	uint64_t src_phys, dst_phys, shader_phys, job_phys, fau_phys;
+-	volatile uint32_t *j;
++	vm_offset_t srcpage = 0, dstpage = 0, isapage = 0, faupage = 0, descpage = 0, rsdpage = 0;
++	uint64_t src_phys, dst_phys, shader_phys, job_phys, fau_phys, rsd_phys;
++	volatile uint32_t *j, *rsd;
+ 	volatile uint64_t *fau;
+ 	int i, ok = 0;
+ 
+@@ -2108,8 +2108,10 @@
+ 	    kmem_alloc(kernel_map, &faupage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+ 	    kmem_alloc(kernel_map, &descpage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    kmem_alloc(kernel_map, &rsdpage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("SWEET MALI: v46 no memory for the compute test\n");
++		printf("SWEET MALI: v47 no memory for the compute test\n");
+ 		return;
+ 	}
+ 
+@@ -2122,6 +2124,7 @@
+ 	src_phys = kvtophys(srcpage);
+ 	dst_phys = kvtophys(dstpage);
+ 	shader_phys = kvtophys(isapage);
++	rsd_phys = kvtophys(rsdpage);
+ 	fau_phys = kvtophys(faupage);
+ 	job_phys = kvtophys(descpage);          /* own page: 128-byte aligned */
+ 
+@@ -2137,13 +2140,25 @@
+ 	*(volatile uint64_t *)(faupage + MALI_FAU_OFFSET + 8) = dst_phys;
+ 	*(volatile uint32_t *)(faupage + MALI_FAU_OFFSET + 16) = MALI_COPY_ELEMS;
+ 
++	/*
++	 * Valhall's Shader Environment points at a Shader Program descriptor, not
++	 * at the ISA itself (see pan_cmdstream.c:4612-4626 and genxml/v9.xml
++	 * "Shader Program"): type Shader (8), stage Compute (1), 32 registers per
++	 * thread (2) in word 0, then the ISA address in words 2/3.
++	 */
++	rsd = (volatile uint32_t *)rsdpage;
++	rsd[0] = 8u | (1u << 4) | (2u << 30);
++	rsd[1] = 0;                              /* preload r48..r63 */
++	rsd[2] = (uint32_t)shader_phys;
++	rsd[3] = (uint32_t)(shader_phys >> 32);
++
+ 	j = (volatile uint32_t *)descpage;
+ 	j[4] = (4u << 1) | (1u << 16);          /* Type 4 = COMPUTE, index 1 */
+ 	j[5] = 0;
+ 	j[6] = 0;
+ 	j[7] = 0;                               /* next = 0: end of the chain */
+ 	j[8] = (MALI_COPY_WG - 1);              /* workgroup size x/y/z, minus(1) */
+-	j[9] = 1;                               /* task increment */
++	j[9] = 1u | (2u << 14);                 /* task increment 1, axis Z */
+ 	j[10] = MALI_COPY_ELEMS / MALI_COPY_WG;
+ 	j[11] = 1;
+ 	j[12] = 1;
+@@ -2154,8 +2169,8 @@
+ 	j[17] = MALI_FAU_WORDS;                 /* FAU count */
+ 	j[24] = 0;
+ 	j[25] = 0;                              /* resources */
+-	j[26] = (uint32_t)shader_phys;
+-	j[27] = (uint32_t)(shader_phys >> 32);  /* shader (ISA) address */
++	j[26] = (uint32_t)rsd_phys;
++	j[27] = (uint32_t)(rsd_phys >> 32);     /* Shader Program (RSD) address */
+ 	j[28] = 0;
+ 	j[29] = 0;                              /* thread storage */
+ 	j[30] = (uint32_t)fau_phys;
+@@ -2164,6 +2179,7 @@
+ 	FlushPoC_DcacheRegion(isapage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(faupage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(descpage, PAGE_SIZE);
++	FlushPoC_DcacheRegion(rsdpage, PAGE_SIZE);
+ 
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_MASK, 0);
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
+@@ -2183,7 +2199,7 @@
+ 			ok++;
+ 		}
+ 	}
+-	printf("SWEET MALI: v46 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
++	printf("SWEET MALI: v47 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
+ 	    ok, (int)MALI_COPY_ELEMS,
+ 	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
+ 	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS));
+@@ -2193,6 +2209,7 @@
+ 	kmem_free(kernel_map, isapage, PAGE_SIZE);
+ 	kmem_free(kernel_map, faupage, PAGE_SIZE);
+ 	kmem_free(kernel_map, descpage, PAGE_SIZE);
++	kmem_free(kernel_map, rsdpage, PAGE_SIZE);
+ }
+ 
+ static void
+@@ -2313,7 +2330,7 @@
+ 	 */
+ 	mali_as0_update(0, 2);
+ 	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
+-	printf("SWEET MALI: v46 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v47 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+@@ -2347,7 +2364,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v46 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v47 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -2410,7 +2427,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v46");
++		mali_bg3d_gate("v47");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
