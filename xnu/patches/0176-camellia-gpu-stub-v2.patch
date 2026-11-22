@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -623,2 +623,288 @@
+@@ -623,2 +623,319 @@
  }
  #endif /* SWEET */
 +
@@ -270,25 +270,56 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +	return true;
 +}
 +
++static bool gSweetGPUStarted;
++
++static bool
++sweet_gpu_bring_up(IOService *provider)
++{
++	IOService *gpu;
++	bool iok, aok, sok;
++
++	if (gSweetGPUStarted) {
++		return true;
++	}
++	if (provider == NULL) {
++		provider = IOService::getPlatform();
++	}
++	if (provider == NULL) {
++		IOLog("SWEET GPU: no provider\n");
++		return false;
++	}
++	gpu = (IOService *)OSMetaClass::allocClassWithName("IOAcceleratorES");
++	IOLog("SWEET GPU: alloc=%p provider=%p\n", gpu, provider);
++	if (gpu == NULL) {
++		return false;
++	}
++	iok = gpu->init();
++	aok = iok && gpu->attach(provider);
++	sok = aok && gpu->start(provider);
++	IOLog("SWEET GPU: init=%d attach=%d start=%d\n", iok, aok, sok);
++	if (!sok) {
++		if (aok) {
++			gpu->detach(provider);
++		}
++		gpu->release();
++		return false;
++	}
++	gSweetGPUStarted = true;
++	IOLog("SWEET GPU: accelerator is up (gpu_id=%08x)\n", sweet_gpu_reg_read(kSweetGPUGpuId));
++	return true;
++}
++
 +extern "C" void
 +sweet_force_gpu(IOService *provider)
 +{
-+	IOService *gpu;
++	(void)sweet_gpu_bring_up(provider);
++}
 +
-+	if (provider == NULL) {
-+		return;
-+	}
-+	gpu = (IOService *)OSMetaClass::allocClassWithName("IOAcceleratorES");
-+	IOLog("SWEET GPU: alloc=%p\n", gpu);
-+	if (gpu != NULL) {
-+		bool iok = gpu->init();
-+		bool aok = iok && gpu->attach(provider);
-+		bool sok = aok && gpu->start(provider);
-+		IOLog("SWEET GPU: init=%d attach=%d start=%d\n", iok, aok, sok);
-+		if (!sok) {
-+			gpu->release();
-+		}
-+	}
++/* Called by bsd/dev/sweet_touch_mtk.c once the GPU is out of reset. */
++extern "C" void
++sweet_gpu_start(void)
++{
++	(void)sweet_gpu_bring_up(NULL);
 +}
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
