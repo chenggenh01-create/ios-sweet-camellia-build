@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -623,2 +623,319 @@
+@@ -623,2 +623,328 @@
  }
  #endif /* SWEET */
 +
@@ -94,6 +94,8 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +
 +public:
 +	virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type,
++	    OSDictionary *properties) APPLE_KEXT_OVERRIDE;
 +	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 +	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
 +	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -103,14 +105,21 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +OSDefineMetaClassAndStructors(SweetGPUUserClient, IOUserClient);
 +
 +bool
-+SweetGPUUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++SweetGPUUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type,
++    OSDictionary *properties)
 +{
-+	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++	if (!IOUserClient::initWithTask(owningTask, securityID, type, properties)) {
 +		return false;
 +	}
 +	fTask = owningTask;
 +	fGPU = NULL;
 +	return true;
++}
++
++bool
++SweetGPUUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	return initWithTask(owningTask, securityID, type, NULL);
 +}
 +
 +bool
@@ -140,7 +149,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +	out->minor = 0;
 +	out->gpu_id = sweet_gpu_reg_read(kSweetGPUGpuId);
 +	out->page_size = 16384;
-+	strlcpy(out->name, "Mali-G57 MC2", sizeof(out->name));
++	memcpy(out->name, "Mali-G57 MC2", sizeof("Mali-G57 MC2"));
 +	return kIOReturnSuccess;
 +}
 +
