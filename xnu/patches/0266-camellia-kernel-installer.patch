@@ -1,0 +1,138 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -33,6 +33,72 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <sys/namei.h>
++#include <sys/vnode.h>
++#include <sys/vnode_attr.h>
++#include <sys/kauth.h>
++#include <sys/fcntl.h>
++#include <sys/uio.h>
++
++
++/*
++ * v50: write a file into the mounted iOS root from the kernel.
++ *
++ * The BSD layer does not export vn_open(); open1() uses vn_open_auth(), which is
++ * in the kernel image, so declare it here.  This is the prerequisite for
++ * installing our own userland (Metal front-end and Vulkan driver) later.
++ */
++extern int vn_open_auth(struct nameidata *ndp, int *flagsp,
++    struct vnode_attr *vap, vnode_t authvp);
++
++static int
++sweet_write_root_file(const char *path, const void *data, size_t len, int mode)
++{
++	struct nameidata nd;
++	struct vnode_attr va;
++	vfs_context_t ctx = vfs_context_current();
++	int flags = O_CREAT | O_TRUNC | FWRITE;
++	int resid = 0, error;
++
++	bzero(&nd, sizeof(nd));
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_type, VREG);
++	VATTR_SET(&va, va_mode, mode);
++
++	NDINIT(&nd, CREATE, 0, 0, UIO_SYSSPACE, path, ctx);
++	error = vn_open_auth(&nd, &flags, &va, NULL);
++	if (error != 0) {
++		printf("SWEET INSTALL: vn_open_auth(%s) failed %d\n", path, error);
++		return error;
++	}
++	error = vn_rdwr(UIO_WRITE, nd.ni_vp, (caddr_t)(uintptr_t)data, (int)len, 0,
++	    UIO_SYSSPACE, 0, kauth_cred_get(), &resid, current_proc());
++	(void)vn_close(nd.ni_vp, flags, ctx);
++	if (error != 0) {
++		printf("SWEET INSTALL: vn_rdwr(%s) failed %d\n", path, error);
++	}
++	return error;
++}
++
++static void
++sweet_install_probe(void)
++{
++	static const char msg[] =
++	    "sweet userland install probe\n"
++	    "written by the kernel at boot; safe to delete\n";
++	int enable = 0;
++	int error;
++
++	PE_parse_boot_argn("sweetinstall", &enable, sizeof(enable));
++	if (enable != 1) {
++		return;
++	}
++	error = sweet_write_root_file("/private/var/mobile/sweet_install_probe.txt",
++	    msg, sizeof(msg) - 1, 0644);
++	printf("SWEET INSTALL: probe %s (err=%d)\n",
++	    error == 0 ? "written" : "FAILED", error);
++}
++
+ #include <vm/vm_kern.h>
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -2122,7 +2188,7 @@
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+ 	    kmem_alloc(kernel_map, &tlspage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("SWEET MALI: v49 no memory for the compute test\n");
++		printf("SWEET MALI: v50 no memory for the compute test\n");
+ 		return;
+ 	}
+ 
+@@ -2216,7 +2282,7 @@
+ 	}
+ 	mali_compute_ok = (unsigned)ok;
+ 	mali_compute_words = (unsigned)MALI_COPY_ELEMS;
+-	printf("SWEET MALI: v49 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
++	printf("SWEET MALI: v50 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
+ 	    ok, (int)MALI_COPY_ELEMS,
+ 	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
+ 	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS));
+@@ -2349,7 +2415,7 @@
+ 	 */
+ 	mali_as0_update(0, 2);
+ 	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
+-	printf("SWEET MALI: v49 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v50 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+@@ -2383,7 +2449,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v49 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v50 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -2446,7 +2512,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v49");
++		mali_bg3d_gate("v50");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
+@@ -2515,6 +2581,7 @@
+ 	/* v31: ask the GPU to write a value into a page of ours. */
+ 	mali_first_job(mali_prd(mali_p_gpu, 0x100));
+ 	printf("SWEET MALI: power-on done\n");
++	sweet_install_probe();
+ 	return;
+ 
+ fail:
+@@ -2543,7 +2610,7 @@
+ 		 * supply the whole time. */
+ 		printf("SWEET MALI: BG batches=%u jobs=%u ok=%u bad=%u\n",
+ 	    mali_bg_batches, mali_bg_jobs, mali_bg_ok, mali_bg_bad);
+-	printf("SWEET MALI: v49 compute copy %u/%u words ok\n",
++	printf("SWEET MALI: v50 compute copy %u/%u words ok\n",
+ 	    mali_compute_ok, mali_compute_words);
+ 	printf("SWEET MALI: PMIC VPROC1 con0=%04x(%d) dbg0=%04x(%d) dbg1=%04x(%d) elr0=%04x(%d)\n",
+ 		    vp1_con, a, vp1_vosel, b, vp1_en, c, vp1_elr, e);
