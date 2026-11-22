@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 --- a/bsd/dev/sweet_touch_mtk.c
 +++ b/bsd/dev/sweet_touch_mtk.c
-@@ -33,6 +33,72 @@
+@@ -33,6 +33,74 @@
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
  #include <pexpert/pexpert.h>
@@ -21,6 +21,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 + */
 +extern int vn_open_auth(struct nameidata *ndp, int *fmodep,
 +    struct vnode_attr *vap, vnode_t authvp);
++extern int vn_close(vnode_t vp, int flags, vfs_context_t ctx);
 +
 +static int
 +sweet_write_root_file(const char *path, const void *data, size_t len, int mode)
@@ -36,7 +37,8 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
 +	VATTR_INIT(&va);
 +	VATTR_SET(&va, va_mode, mode);
 +
-+	NDINIT(&nd, LOOKUP, OP_OPEN, FOLLOW, UIO_SYSSPACE, path, ctx);
++	NDINIT(&nd, LOOKUP, OP_OPEN, FOLLOW, UIO_SYSSPACE,
++	    (user_addr_t)(uintptr_t)path, ctx);
 +	error = vn_open_auth(&nd, &flags, &va, NULLVP);
 +	if (error != 0) {
 +		printf("SWEET INSTALL: open(%s) failed %d\n", path, error);
@@ -74,7 +76,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  #include <vm/vm_kern.h>
  
  #if defined(ARM64_BOARD_CONFIG_SWEET)
-@@ -2122,7 +2188,7 @@
+@@ -2122,7 +2190,7 @@
  	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
  	    kmem_alloc(kernel_map, &tlspage, PAGE_SIZE,
  	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
@@ -83,7 +85,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  		return;
  	}
  
-@@ -2216,7 +2282,7 @@
+@@ -2216,7 +2284,7 @@
  	}
  	mali_compute_ok = (unsigned)ok;
  	mali_compute_words = (unsigned)MALI_COPY_ELEMS;
@@ -92,7 +94,25 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	    ok, (int)MALI_COPY_ELEMS,
  	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
  	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS));
-@@ -2349,7 +2415,7 @@
+@@ -2266,7 +2334,16 @@
+ 	}
+ 	mali_chain_probe(page, phys, shader_mask);
+ 	mali_chain_bulk(shader_mask);
+-	mali_compute_copy(shader_mask);
++	/* Opt-in: changes GPU state, so only run it when asked. */
++	{
++		int compute_test = 0;
++
++		PE_parse_boot_argn("sweetcomputetest", &compute_test,
++		    sizeof(compute_test));
++		if (compute_test == 1) {
++			mali_compute_copy(shader_mask);
++		}
++	}
+ 
+ 	/* 2 and 4: the same page behind two different GPU addresses. */
+ 	if (mali_map_page(MALI_MAPPED_GPU, phys)) {
+@@ -2349,7 +2426,7 @@
  	 */
  	mali_as0_update(0, 2);
  	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
@@ -101,7 +121,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
  	    (uint32_t)mali_pt_top_phys);
  	kmem_free(kernel_map, page, PAGE_SIZE);
-@@ -2383,7 +2449,7 @@
+@@ -2383,7 +2460,7 @@
  	}
  	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
  	dfd = (misc >> 19) & 1u;
@@ -110,7 +130,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
  	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
  	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
-@@ -2446,7 +2512,7 @@
+@@ -2446,7 +2523,7 @@
  	 * PWR_ISO only isolates signals, it does not hold the clock. */
  	printf("SWEET MALI: gpu clocks on\n");
  	if (mfg1_sram) {
@@ -119,7 +139,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	} else {
  		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
  	}
-@@ -2515,6 +2581,7 @@
+@@ -2515,6 +2592,7 @@
  	/* v31: ask the GPU to write a value into a page of ours. */
  	mali_first_job(mali_prd(mali_p_gpu, 0x100));
  	printf("SWEET MALI: power-on done\n");
@@ -127,7 +147,7 @@ diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
  	return;
  
  fail:
-@@ -2543,7 +2610,7 @@
+@@ -2543,7 +2621,7 @@
  		 * supply the whole time. */
  		printf("SWEET MALI: BG batches=%u jobs=%u ok=%u bad=%u\n",
  	    mali_bg_batches, mali_bg_jobs, mali_bg_ok, mali_bg_bad);
