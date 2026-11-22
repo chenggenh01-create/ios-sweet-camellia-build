@@ -143,10 +143,14 @@ jobs:
                      iokit/Kernel/arm/hid/SweetHID.cpp \
                      iokit/Kernel/IOUserClient.cpp \
                      iokit/Kernel/IOService.cpp \
+                     iokit/KernelConfigTables.cpp \
                      iokit/conf/files.arm64; do
-            src="dxb/xnu/$rel"
-            if [ -f "$src" ]; then
+            src=$(find dxb -path "*$rel" | head -1)
+            if [ -n "$src" ]; then
+              echo "dump $rel <- $src"
               cp "$src" "dump/$(echo $rel | tr '/' '_')"
+            else
+              echo "missing $rel"
             fi
           done
           F=$(find dxb -path '*iokit/Kernel/arm/SweetFramebuffer.cpp' | head -1)
