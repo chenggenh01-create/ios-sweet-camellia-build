@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -623,2 +623,328 @@
+@@ -623,2 +623,337 @@
  }
  #endif /* SWEET */
 +
@@ -329,6 +329,15 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +sweet_gpu_start(void)
 +{
 +	(void)sweet_gpu_bring_up(NULL);
++}
++
++/* 0 = never started, 1 = service is up. Polled by the steady-state console
++ * block so a photo taken long after boot still shows whether publishing
++ * worked. */
++extern "C" int
++sweet_gpu_service_state(void)
++{
++	return gSweetGPUStarted ? 1 : 0;
 +}
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
