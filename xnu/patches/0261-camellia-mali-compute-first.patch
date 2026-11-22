@@ -1,0 +1,208 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -2032,6 +2032,169 @@
+ 	}
+ }
+ 
++
++/* ------------------------------------------------------------------ *
++ * v46: the first compute job, i.e. the GPU doing real work with machine code
++ * we generated ourselves (see .github/workflows/panblob.yml).  The job layout
++ * follows Mesa's genxml/v9.xml "Compute Job": Header (words 0-7) then the
++ * invocation (words 8-15) and the Shader Environment at byte 64.
++ * ------------------------------------------------------------------ */
++static const uint32_t mali_copy_isa[340] = {
++    0x00000005, 0x00000020, 0x00000000, 0x00000000, 0x00000002, 0x0000000f, 0x41500000, 0x00000000,
++    0x41500000, 0x40000000, 0x41500000, 0x00000000, 0x00000000, 0x40000000, 0x00000100, 0x00000000,
++    0x00000002, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000007, 0x00000006, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x10000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000000b, 0x0000000b, 0x00000080,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000040, 0x00000001, 0x00000001, 0x00000100, 0x80c08a3c, 0x00f0c004, 0x00000c40, 0x501fc030,
++    0x19c0cf3c, 0x00b4c000, 0x19c0c87c, 0x00b4c101, 0x00000086, 0x0091c200, 0x00000087, 0x0091c300,
++    0x00000041, 0x0091c400, 0x00000040, 0x0091c500, 0x00070442, 0x01abc000, 0x18000040, 0x00608082,
++    0x00000088, 0x0091c200, 0x00000089, 0x0091c300, 0x00074442, 0x09abc200, 0x58000042, 0x50614002,
++    0x00000000, 0x7800c000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
++    0x00000000, 0x00000000, 0x00000000, 0x00000000,
++};
++
++#define MALI_FAU_WORDS       11     /* DIV_ROUND_UP(24 sysvals + 20 args, 4) */
++#define MALI_FAU_OFFSET      24     /* BIFROST_PRECOMPILED_KERNEL_ARGS_OFFSET */
++#define MALI_COPY_ELEMS      1024   /* one page of uint32 */
++#define MALI_COPY_WG         64     /* KERNEL(64) in the shader source */
++
++static void
++mali_compute_copy(uint32_t shader_mask)
++{
++	vm_offset_t srcpage = 0, dstpage = 0, isapage = 0, faupage = 0, descpage = 0;
++	uint64_t src_phys, dst_phys, shader_phys, job_phys, fau_phys;
++	volatile uint32_t *j;
++	volatile uint64_t *fau;
++	int i, ok = 0;
++
++	if (kmem_alloc(kernel_map, &srcpage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    kmem_alloc(kernel_map, &dstpage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    kmem_alloc(kernel_map, &isapage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    kmem_alloc(kernel_map, &faupage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    kmem_alloc(kernel_map, &descpage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET MALI: v46 no memory for the compute test\n");
++		return;
++	}
++
++	memcpy((void *)isapage, mali_copy_isa, sizeof(mali_copy_isa));
++	for (i = 0; i < MALI_COPY_ELEMS; i++) {
++		*(volatile uint32_t *)(srcpage + (uint64_t)i * 4) =
++		    0x5A5A0000u + (uint32_t)i;
++	}
++
++	src_phys = kvtophys(srcpage);
++	dst_phys = kvtophys(dstpage);
++	shader_phys = kvtophys(isapage);
++	fau_phys = kvtophys(faupage);
++	job_phys = kvtophys(descpage);          /* own page: 128-byte aligned */
++
++	/*
++	 * FAU / push uniforms: sysvals first (num_workgroups[3] + printf pointer
++	 * = 24 bytes), then the kernel arguments at byte 24.
++	 */
++	fau = (volatile uint64_t *)faupage;
++	fau[0] = (uint64_t)(MALI_COPY_ELEMS / MALI_COPY_WG) | ((uint64_t)1 << 32);
++	fau[1] = 0;
++	fau[2] = 0;
++	*(volatile uint64_t *)(faupage + MALI_FAU_OFFSET + 0) = src_phys;
++	*(volatile uint64_t *)(faupage + MALI_FAU_OFFSET + 8) = dst_phys;
++	*(volatile uint32_t *)(faupage + MALI_FAU_OFFSET + 16) = MALI_COPY_ELEMS;
++
++	j = (volatile uint32_t *)descpage;
++	j[4] = (4u << 1) | (1u << 16);          /* Type 4 = COMPUTE, index 1 */
++	j[5] = 0;
++	j[6] = 0;
++	j[7] = 0;                               /* next = 0: end of the chain */
++	j[8] = (MALI_COPY_WG - 1);              /* workgroup size x/y/z, minus(1) */
++	j[9] = 1;                               /* task increment */
++	j[10] = MALI_COPY_ELEMS / MALI_COPY_WG;
++	j[11] = 1;
++	j[12] = 1;
++	j[13] = 0;
++	j[14] = 0;
++	j[15] = 0;
++	j[16] = 0;                              /* Shader Environment: attr offset */
++	j[17] = MALI_FAU_WORDS;                 /* FAU count */
++	j[24] = 0;
++	j[25] = 0;                              /* resources */
++	j[26] = (uint32_t)shader_phys;
++	j[27] = (uint32_t)(shader_phys >> 32);  /* shader (ISA) address */
++	j[28] = 0;
++	j[29] = 0;                              /* thread storage */
++	j[30] = (uint32_t)fau_phys;
++	j[31] = (uint32_t)(fau_phys >> 32);     /* FAU address */
++
++	FlushPoC_DcacheRegion(isapage, PAGE_SIZE);
++	FlushPoC_DcacheRegion(faupage, PAGE_SIZE);
++	FlushPoC_DcacheRegion(descpage, PAGE_SIZE);
++
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_MASK, 0);
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_HEAD_NEXT_LO, (uint32_t)job_phys);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_HEAD_NEXT_HI, (uint32_t)(job_phys >> 32));
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_AFFINITY_LO, shader_mask);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_AFFINITY_HI, 0);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_CONFIG_NEXT, MALI_JS_CONFIG);
++	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_COMMAND_NEXT, 1u);
++	(void)mali_wait(mali_p_gpu, MALI_JOB_INT_RAWSTAT, (1u << 1), (1u << 1), 500000);
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
++
++	FlushPoC_DcacheRegion(dstpage, PAGE_SIZE);
++	for (i = 0; i < MALI_COPY_ELEMS; i++) {
++		if (*(volatile uint32_t *)(dstpage + (uint64_t)i * 4) ==
++		    0x5A5A0000u + (uint32_t)i) {
++			ok++;
++		}
++	}
++	printf("SWEET MALI: v46 compute copy %d/%d words ok (raw=%08x slot=%08x)\n",
++	    ok, (int)MALI_COPY_ELEMS,
++	    mali_prd(mali_p_gpu, MALI_JOB_INT_RAWSTAT),
++	    mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS));
++
++	kmem_free(kernel_map, srcpage, PAGE_SIZE);
++	kmem_free(kernel_map, dstpage, PAGE_SIZE);
++	kmem_free(kernel_map, isapage, PAGE_SIZE);
++	kmem_free(kernel_map, faupage, PAGE_SIZE);
++	kmem_free(kernel_map, descpage, PAGE_SIZE);
++}
++
+ static void
+ mali_first_job(uint32_t shader_mask)
+ {
+@@ -2067,6 +2230,7 @@
+ 	}
+ 	mali_chain_probe(page, phys, shader_mask);
+ 	mali_chain_bulk(shader_mask);
++	mali_compute_copy(shader_mask);
+ 
+ 	/* 2 and 4: the same page behind two different GPU addresses. */
+ 	if (mali_map_page(MALI_MAPPED_GPU, phys)) {
+@@ -2149,7 +2313,7 @@
+ 	 */
+ 	mali_as0_update(0, 2);
+ 	mali_bg_start(mali_prd(mali_p_gpu, 0x100));
+-	printf("SWEET MALI: v45 first job state=%x pt_pages=%u top=%08x%08x\n",
++	printf("SWEET MALI: v46 first job state=%x pt_pages=%u top=%08x%08x\n",
+ 	    mali_job_state, mali_pt_pages, (uint32_t)(mali_pt_top_phys >> 32),
+ 	    (uint32_t)mali_pt_top_phys);
+ 	kmem_free(kernel_map, page, PAGE_SIZE);
+@@ -2183,7 +2347,7 @@
+ 	}
+ 	misc = mali_prd(mali_p_infra, MALI_MFG_MISC_CON);
+ 	dfd = (misc >> 19) & 1u;
+-	printf("SWEET MALI: v45 power-on start 16C=%08x 170=%08x\n",
++	printf("SWEET MALI: v46 power-on start 16C=%08x 170=%08x\n",
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS),
+ 	    mali_prd(mali_p_spm, MALI_SPM_PWR_STATUS_2ND));
+ 	printf("SWEET MALI: MFG_MISC_CON=%08x dfd=%d done=%d\n", misc, dfd,
+@@ -2246,7 +2410,7 @@
+ 	 * PWR_ISO only isolates signals, it does not hold the clock. */
+ 	printf("SWEET MALI: gpu clocks on\n");
+ 	if (mfg1_sram) {
+-		mali_bg3d_gate("v45");
++		mali_bg3d_gate("v46");
+ 	} else {
+ 		printf("SWEET MALI: bg3d skipped (mfg1 sram not ready)\n");
+ 	}
