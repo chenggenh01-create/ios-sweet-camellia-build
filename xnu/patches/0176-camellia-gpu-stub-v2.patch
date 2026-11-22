@@ -282,7 +282,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +		return true;
 +	}
 +	if (provider == NULL) {
-+		provider = IOService::getPlatform();
++		provider = (IOService *)IOService::getPlatform();
 +	}
 +	if (provider == NULL) {
 +		IOLog("SWEET GPU: no provider\n");
