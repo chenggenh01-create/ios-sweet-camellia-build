@@ -141,6 +141,7 @@ jobs:
           print('isa words', len(words))
           PY
           ls -l copy_isa.bin || true
+          ninja -C mesa/build src/panfrost/compiler/bifrost/bifrost_compiler 2>&1 | tail -3 || true
           TOOL=$(find mesa/build -type f -perm -u+x -name 'bifrost_compiler' | head -1)
           echo "disassembler: $TOOL"
           if [ -n "$TOOL" ] && [ -f copy_isa.bin ]; then
