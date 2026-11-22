@@ -137,6 +137,18 @@ jobs:
         if: always()
         run: |
           mkdir -p dump
+          # Exact post-patch sources for files the GPU service patch has to edit;
+          # the local worktree is an older snapshot, so the CI tree is the truth.
+          for rel in iokit/Kernel/arm/SweetFramebuffer.cpp \
+                     iokit/Kernel/arm/hid/SweetHID.cpp \
+                     iokit/Kernel/IOUserClient.cpp \
+                     iokit/Kernel/IOService.cpp \
+                     iokit/conf/files.arm64; do
+            src="dxb/xnu/$rel"
+            if [ -f "$src" ]; then
+              cp "$src" "dump/$(echo $rel | tr '/' '_')"
+            fi
+          done
           F=$(find dxb -path '*iokit/Kernel/arm/SweetFramebuffer.cpp' | head -1)
           echo "file: $F"
           if [ -n "$F" ]; then
