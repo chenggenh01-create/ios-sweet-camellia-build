@@ -4,7 +4,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 @@ -623,2 +623,288 @@
  }
  #endif /* SWEET */
-+﻿
++
 +/*
 + * A Metal-capable accelerator.
 + *
