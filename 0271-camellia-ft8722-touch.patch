@@ -1,0 +1,381 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+index 0cb3fc1..5dbfac0 100644
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -1,4 +1,4 @@
+-﻿/*
++/*
+  * camellia (MT6833 / Dimensity 700) Novatek NT36672C touch probe.
+  *
+  * Register model and bit-bang timing are taken from the working
+@@ -18,6 +18,7 @@
+  *
+  * Boot args:
+  *   sweettouchmtk=1      enable this probe (default 0)
++ *   sweettouchmtk=2      enable the Tianma FT8722 touch driver
+  *   sweettouchdelay=N    seconds before probing (default 30)
+  *   sweetmtkdelay=US     half SPI clock period in microseconds (default 2)
+  *   sweettouchsecs=N     how long to keep probing (default 1800)
+@@ -274,6 +275,325 @@ spi_xfer(uint8_t out)
+ 	return in;
+ }
+ 
++/* FT8722 SPI framing and RAM boot follow Focaltech V3.3 in the Xiaomi
++ * Android kernel (drivers/input/touchscreen/FT8722). */
++#define FTS_CONTACTS		10u
++#define FTS_REPORT_LEN		90u
++#define FTS_PRAM_LEN		64092u
++#define FTS_DRAM_LEN		4884u
++#define FTS_FW_LEN		(FTS_PRAM_LEN + FTS_DRAM_LEN)
++#define FTS_PACKET_LEN		1024u
++
++/* The boot packer fills this file-backed Mach-O section locally. Keep reads
++ * volatile so the compiler cannot specialize them for the CI placeholder. */
++__attribute__((used, section("__DATA,__fts8722")))
++static volatile const uint8_t fts_firmware[FTS_FW_LEN] =
++    "CAMELLIA_FT8722_FW_SLOT_V1";
++
++static uint8_t
++fts_header(uint8_t reg, uint8_t control, unsigned len)
++{
++	spi_cs(true);
++	spi_xfer(reg);
++	spi_xfer(control);
++	spi_xfer((uint8_t)(len >> 8));
++	return spi_xfer((uint8_t)len);
++}
++
++static void
++fts_end(void)
++{
++	spi_cs(false);
++	delay(150);
++}
++
++static void
++fts_dummy(void)
++{
++	for (unsigned i = 0; i < 3; i++) {
++		spi_xfer(0);
++	}
++}
++
++static bool
++fts_write(uint8_t reg, const volatile uint8_t *data, unsigned len)
++{
++	for (unsigned retry = 0; retry < 3; retry++) {
++		uint8_t status = fts_header(reg, 0x00, len);
++
++		if (len != 0) {
++			fts_dummy();
++			for (unsigned i = 0; i < len; i++) {
++				spi_xfer(data[i]);
++			}
++		}
++		fts_end();
++		if ((status & 0xA0) == 0) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static bool
++fts_read(uint8_t reg, uint8_t *data, unsigned len)
++{
++	for (unsigned retry = 0; retry < 3; retry++) {
++		uint8_t status = fts_header(reg, 0xA0, len);
++		uint16_t crc = 0xFFFF;
++		uint16_t wire_crc;
++
++		fts_dummy();
++		for (unsigned i = 0; i < len; i++) {
++			data[i] = spi_xfer(0);
++			crc ^= data[i];
++			for (unsigned bit = 0; bit < 8; bit++) {
++				crc = (crc >> 1) ^ ((crc & 1) ? 0x8408u : 0u);
++			}
++		}
++		wire_crc = spi_xfer(0);
++		wire_crc |= (uint16_t)spi_xfer(0) << 8;
++		fts_end();
++		if ((status & 0xA0) == 0 && crc == wire_crc) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static uint16_t
++fts_be16(const volatile uint8_t *p)
++{
++	return ((uint16_t)p[0] << 8) | p[1];
++}
++
++static uint16_t
++fts_fw_ecc(const volatile uint8_t *data, unsigned len)
++{
++	uint16_t ecc = 0;
++
++	for (unsigned i = 0; i < len; i += 2) {
++		ecc ^= fts_be16(data + i);
++		for (unsigned bit = 0; bit < 16; bit++) {
++			ecc = (ecc >> 1) ^ ((ecc & 1) ? 0x8408u : 0u);
++		}
++	}
++	return ecc;
++}
++
++static bool
++fts_firmware_valid(void)
++{
++	const volatile uint8_t *info = fts_firmware + 0x100;
++	unsigned code = fts_be16(info), data = fts_be16(info + 8);
++
++	return code * 2 == FTS_PRAM_LEN && data * 2 == FTS_DRAM_LEN &&
++	       code + fts_be16(info + 2) == 0xFFFF &&
++	       data + fts_be16(info + 10) == 0xFFFF &&
++	       fts_fw_ecc(fts_firmware, FTS_PRAM_LEN) == 0x96F0 &&
++	       fts_fw_ecc(fts_firmware + FTS_PRAM_LEN, FTS_DRAM_LEN) == 0x9892;
++}
++
++static bool
++fts_enter_rom(void)
++{
++	pin_out(PIN_RST, true);
++	pin_dir(PIN_RST, true);
++	pin_mode(PIN_RST, 0);
++	for (unsigned attempt = 0; attempt < 4; attempt++) {
++		pin_out(PIN_RST, false);
++		delay(2000);
++		pin_out(PIN_RST, true);
++		delay(8000);
++		for (unsigned retry = 0; retry < 3; retry++) {
++			uint8_t id[2] = { 0 };
++
++			if (!fts_write(0x55, NULL, 0)) {
++				continue;
++			}
++			delay(8000);
++			if (fts_read(0x90, id, sizeof(id))) {
++				printf("SWEET FTS: ROM ID %02x%02x\n", id[0], id[1]);
++				if (id[0] == 0x87 && id[1] == 0x22) {
++					return true;
++				}
++			}
++		}
++	}
++	return false;
++}
++
++static bool
++fts_load_ram(unsigned base, const volatile uint8_t *data, unsigned len,
++    uint16_t expected_ecc)
++{
++	const uint8_t ecc_args[] = { (uint8_t)(base >> 16),
++		(uint8_t)(base >> 8), (uint8_t)base, (uint8_t)(len >> 16),
++		(uint8_t)(len >> 8), (uint8_t)len };
++	uint8_t reply[2];
++
++	/* The address is explicit for each write. Use short packets to let
++	 * the scheduler run between GPIO transfers on single-CPU boots. */
++	for (unsigned offset = 0; offset < len; offset += FTS_PACKET_LEN) {
++		unsigned addr = base + offset;
++		unsigned count = MIN(FTS_PACKET_LEN, len - offset);
++		const uint8_t address[] = { (uint8_t)(addr >> 16),
++			(uint8_t)(addr >> 8), (uint8_t)addr };
++
++		if (!fts_write(0xAD, address, sizeof(address)) ||
++		    !fts_write(0xAE, data + offset, count)) {
++			printf("SWEET FTS: RAM write failed at %06x\n", addr);
++			return false;
++		}
++		touch_wait(1);
++	}
++	if (!fts_write(0xCC, ecc_args, sizeof(ecc_args))) {
++		return false;
++	}
++	touch_wait(2);
++	for (unsigned i = 0; i < 100; i++) {
++		if (fts_read(0xCE, reply, 1) && reply[0] == 0xA5) {
++			if (!fts_read(0xCD, reply, sizeof(reply))) {
++				return false;
++			}
++			uint16_t ecc = fts_be16(reply);
++			printf("SWEET FTS: RAM %06x ECC %04x expected %04x\n",
++			    base, ecc, expected_ecc);
++			return ecc == expected_ecc;
++		}
++		touch_wait(1);
++	}
++	printf("SWEET FTS: RAM %06x ECC timeout\n", base);
++	return false;
++}
++
++static bool
++fts_boot(void)
++{
++	if (!fts_enter_rom()) {
++		printf("SWEET FTS: FT8722 ROM probe failed\n");
++		return false;
++	}
++	if (!fts_load_ram(0, fts_firmware, FTS_PRAM_LEN, 0x96F0) ||
++	    !fts_load_ram(0xD00000, fts_firmware + FTS_PRAM_LEN, FTS_DRAM_LEN,
++	    0x9892) || !fts_write(0x08, NULL, 0)) {
++		return false;
++	}
++	for (unsigned i = 0; i < 20; i++) {
++		uint8_t version;
++
++		touch_wait(10);
++		if (fts_read(0xA6, &version, 1) && version == 0x0C) {
++			printf("SWEET FTS: FT8722 firmware %02x ready\n", version);
++			return true;
++		}
++	}
++	printf("SWEET FTS: firmware did not report version 0c\n");
++	return false;
++}
++
++struct fts_frame {
++	uint16_t down;
++	uint16_t x[FTS_CONTACTS], y[FTS_CONTACTS];
++};
++
++/* The register address is excluded from the received buffer. Points are
++ * six-byte records beginning at offset 2. IDs 10 through 15 end the list. */
++static bool
++fts_decode_frame(const uint8_t *report, struct fts_frame *frame)
++{
++	unsigned count = report[1] & 0x0F;
++	uint16_t seen = 0;
++
++	if (count > FTS_CONTACTS ||
++	    (report[1] == 0xEF && report[2] == 0xEF && report[3] == 0xEF)) {
++		return false;
++	}
++	frame->down = 0;
++	for (unsigned i = 0; i < FTS_CONTACTS; i++) {
++		const uint8_t *p = report + 2 + 6 * i;
++		unsigned id = p[2] >> 4, event = p[0] >> 6;
++		uint16_t mask = (uint16_t)(1u << id);
++		unsigned x = fts_be16(p) & 0x0FFF;
++		unsigned y = fts_be16(p + 2) & 0x0FFF;
++
++		if (id >= FTS_CONTACTS) {
++			break;
++		}
++		if ((seen & mask) || event == 3) {
++			return false;
++		}
++		seen |= mask;
++		if (event == 1) {
++			continue;
++		}
++		if (count == 0 || x > 1079 || y > 2399) {
++			return false;
++		}
++		frame->down |= mask;
++		frame->x[id] = (uint16_t)x;
++		frame->y[id] = (uint16_t)y;
++	}
++	return count == 0 || frame->down != 0;
++}
++
++static void
++fts_send_frame(const struct fts_frame *frame)
++{
++	for (unsigned id = 0; id < FTS_CONTACTS; id++) {
++		bool down = (frame->down & (1u << id)) != 0;
++
++		if (down && (!hid_down[id] || frame->x[id] != hid_last_x[id] ||
++		    frame->y[id] != hid_last_y[id])) {
++			if (!hid_down[id] && hid_events++ == 0) {
++				printf("SWEET FTS: first contact %u at %u,%u\n",
++				    id, frame->x[id], frame->y[id]);
++			}
++			hid_last_x[id] = frame->x[id];
++			hid_last_y[id] = frame->y[id];
++			sweet_hid_touch((int)id, 1, hid_last_x[id], hid_last_y[id]);
++		} else if (!down && hid_down[id]) {
++			sweet_hid_touch((int)id, 0, hid_last_x[id], hid_last_y[id]);
++		}
++		hid_down[id] = down;
++	}
++}
++
++static void
++fts_poll(void)
++{
++	uint8_t report[FTS_REPORT_LEN];
++	unsigned bad = 0;
++
++	if (!fts_firmware_valid()) {
++		printf("SWEET FTS: missing or invalid Tianma firmware\n");
++		return;
++	}
++	if (!fts_boot()) {
++		return;
++	}
++	for (;;) {
++		struct fts_frame frame = { 0 };
++
++		if (fts_read(0x01, report, sizeof(report)) &&
++		    fts_decode_frame(report, &frame)) {
++			bad = 0;
++			fts_send_frame(&frame);
++		} else if (++bad == 10) {
++			printf("SWEET FTS: lost touch reports, releasing contacts\n");
++			frame.down = 0;
++			fts_send_frame(&frame);
++		} else if (bad == 100) {
++			printf("SWEET FTS: restarting touch firmware\n");
++			if (!fts_boot()) {
++				return;
++			}
++			bad = 0;
++		}
++		touch_wait(10);
++	}
++}
++
+ /* 3-byte page select: FF page[22:15] page[14:7]. */
+ static void
+ nvt_set_page(uint32_t addr)
+@@ -884,10 +1204,11 @@ touch_probe_once(void)
+ }
+ 
+ static void
+-touch_thread(__unused void *arg, __unused wait_result_t wr)
++touch_thread(void *arg, __unused wait_result_t wr)
+ {
+-	unsigned delay_s = 30, secs = 1800, period_ms = 2000;
+-	int half_us = 2;
++	bool focaltech = (uintptr_t)arg == 2;
++	unsigned delay_s = focaltech ? 5 : 30, secs = 1800, period_ms = 2000;
++	int half_us = focaltech ? 1 : 2;
+ 	int fwboot = 0;
+ 	int fwseen = 0;
+ 
+@@ -952,6 +1273,11 @@ touch_thread(__unused void *arg, __unused wait_result_t wr)
+ 	pad_set(st.bl, PAD_IES_MI, true);
+ 	pad_set(st.lm, PAD_IES_IRQ, true);
+ 
++	if (focaltech) {
++		fts_poll();
++		goto out;
++	}
++
+ 	{
+ 		int psci = 0;
+ 
+@@ -2781,7 +3107,8 @@ sweet_touch_mtk_init(void)
+ 		printf("SWEET TOUCH MTK: disabled (sweettouchmtk=0)\n");
+ 		return;
+ 	}
+-	if (kernel_thread_start(touch_thread, NULL, &thread) == KERN_SUCCESS) {
++	if (kernel_thread_start(touch_thread, (void *)(uintptr_t)enabled,
++	    &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	} else {
+ 		printf("SWEET TOUCH MTK: kernel_thread_start failed\n");
