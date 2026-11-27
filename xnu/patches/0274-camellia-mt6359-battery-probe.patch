@@ -1,0 +1,157 @@
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -15,6 +15,24 @@
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++extern "C" uintptr_t ml_io_map(uintptr_t phys_addr, uintptr_t size);
++
++/* MT6833 PWRAP AP software interface 2, from the camellian stock driver. */
++enum {
++	kCamelliaPwrapBase = 0x10026000,
++	kCamelliaPwrapAccess = 0x880,
++	kCamelliaPwrapReadData = 0x894,
++	kCamelliaPwrapClearValid = 0x8a4,
++	kCamelliaPwrapStatus = 0x8a8,
++	kCamelliaPwrapInitialized = 1u << 15,
++	kCamelliaPwrapIdle = 0,
++	kCamelliaPwrapReadValid = 6,
++	kMt6359HardwareId = 0x0008,
++	kMt6359RtcAlarmHour = 0x05a4,
++	kMt6359ChargerDetect = 0x0a88,
++	kMt6359GaugeCurrent = 0x0d8a,
++	kMt6359AuxadcBattery = 0x1088,
++};
+ 
+ class SweetBattery : public IOPMPowerSource {
+ 	OSDeclareDefaultStructors(SweetBattery);
+@@ -28,11 +46,16 @@
+ 	IOTimerEventSource *fTimer;
+ 	bool fTimerAdded, fRunning, fReal;
+ 	int fLastMode;
++	uintptr_t fCamelliaPwrap;
++	unsigned fCamelliaFailures;
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+ 	void publish(unsigned percent, unsigned mv, int ma, bool external,
+ 	    bool capable, bool charging, bool full, bool measured, bool currentValid);
+ 	void poll(void);
++	bool camelliaWait(unsigned state);
++	bool camelliaRead(unsigned address, uint16_t &value);
++	void pollCamellia(void);
+ 	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
+ 	static IOReturn stopPolling(OSObject *owner, void *, void *, void *, void *);
+ 	static bool readWord(unsigned address, uint16_t *value);
+@@ -72,6 +95,8 @@
+ 		}
+ 	}
+ 	fLastMode = -1;
++	fCamelliaPwrap = 0;
++	fCamelliaFailures = 0;
+ 	return true;
+ }
+ 
+@@ -246,13 +271,76 @@
+ 	    charging, full, true, currentValid);
+ }
+ 
++bool
++SweetBattery::camelliaWait(unsigned state)
++{
++	volatile uint32_t *status = (volatile uint32_t *)(fCamelliaPwrap + kCamelliaPwrapStatus);
++	for (unsigned attempt = 0; attempt < 200; ++attempt) {
++		const uint32_t value = *status;
++		if (!(value & kCamelliaPwrapInitialized)) {
++			return false;
++		}
++		if (((value >> 1) & 7u) == state) {
++			return true;
++		}
++		IODelay(2);
++	}
++	return false;
++}
++
++bool
++SweetBattery::camelliaRead(unsigned address, uint16_t &value)
++{
++	if (!camelliaWait(kCamelliaPwrapIdle)) {
++		return false;
++	}
++
++	/* A read command and its completion handshake never write the PMIC itself. */
++	volatile uint32_t *pwrap = (volatile uint32_t *)fCamelliaPwrap;
++	pwrap[kCamelliaPwrapAccess / 4] = address;
++	if (!camelliaWait(kCamelliaPwrapReadValid)) {
++		return false;
++	}
++	value = (uint16_t)pwrap[kCamelliaPwrapReadData / 4];
++	pwrap[kCamelliaPwrapClearValid / 4] = 1;
++	return true;
++}
++
++void
++SweetBattery::pollCamellia(void)
++{
++	uint16_t id = 0, rtc = 0, chrdet = 0, current = 0, adc = 0;
++	if (!camelliaRead(kMt6359HardwareId, id) || (id & 0xff00u) != 0x5900u ||
++	    !camelliaRead(kMt6359RtcAlarmHour, rtc) ||
++	    !camelliaRead(kMt6359ChargerDetect, chrdet) ||
++	    !camelliaRead(kMt6359GaugeCurrent, current) ||
++	    !camelliaRead(kMt6359AuxadcBattery, adc)) {
++		if (fCamelliaFailures++ == 0) {
++			IOLog("SWEET BATTERY: MT6359 probe failed (id=%#x)\n", id);
++		}
++		return;
++	}
++	fCamelliaFailures = 0;
++	const unsigned saved = (rtc >> 8) & 0x7fu;
++	const bool savedValid = (rtc & 0x8000u) && saved <= 100u;
++	/* RTC stores the last saved Android UI SOC. FG and ADC need fresh
++	 * conversions before these data can be published as live telemetry. */
++	IOLog("SWEET BATTERY: MT6359 id=%#x rtc_soc=%u rtc_valid=%d usb=%u fg_raw=%#x vbat_raw=%#x\n",
++	    id, saved, savedValid, chrdet & 1u, current, adc);
++}
++
+ void
+ SweetBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
+ 	if (self && self->fRunning) {
+-		self->poll();
+-		sender->setTimeoutMS(30000);
++		if (self->fCamelliaPwrap) {
++			self->pollCamellia();
++			sender->setTimeoutMS(2000);
++		} else {
++			self->poll();
++			sender->setTimeoutMS(30000);
++		}
+ 	}
+ }
+ 
+@@ -266,15 +354,21 @@
+ 	int real = 0;
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+ 	fReal = real == 1 && sweet_spmi_init() == 0;
++	if (real == 2) {
++		fCamelliaPwrap = ml_io_map(kCamelliaPwrapBase, 0x1000);
++		if (!fCamelliaPwrap) {
++			IOLog("SWEET BATTERY: MT6833 PWRAP mapping failed\n");
++		}
++	}
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+-	if (fReal) {
++	if (fReal || fCamelliaPwrap) {
+ 		fLoop = IOWorkLoop::workLoop();
+ 		fTimer = IOTimerEventSource::timerEventSource(this, &SweetBattery::timerFired);
+ 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
+ 			fTimerAdded = true;
+ 			fRunning = true;
+-			fTimer->setTimeoutMS(30000);
++			fTimer->setTimeoutMS(fCamelliaPwrap ? 10000 : 30000);
+ 		} else {
+ 			fReal = false;
+ 			poll();
