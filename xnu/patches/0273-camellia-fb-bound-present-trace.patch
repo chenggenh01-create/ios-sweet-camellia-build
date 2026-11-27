@@ -1,0 +1,13 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -310,5 +310,8 @@ AppleCLCD::present(const uint8_t *rec)
+-	if (sweet_present_logged < 8) {
++	/* Later trace sites use <= 8, so saturate one past the last traced frame. */
++	if (sweet_present_logged < 9) {
+ 		sweet_present_logged++;
++	}
++	if (sweet_present_logged <= 8) {
+ 		IOLog("SWEET FB: present enter t=%llums frame=%u mask=0x%x id0=%u dst=%p win=%d/%d chunk=%d\n",
+ 		    sweet_trace_ms(), sweet_present_logged, mask, get32(rec, 0x54),
+ 		    (void *)dst, win_start, win_len, sweet_chunk);
