@@ -1,6 +1,6 @@
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -1,6 +1,12 @@
+@@ -249,6 +249,12 @@
  	if (!native) {
 -		fLogicalW = scaled ? 828 : SWEET_FB_LOGICAL_W;
 -		fLogicalH = scaled ? 1792 : SWEET_FB_LOGICAL_H;
