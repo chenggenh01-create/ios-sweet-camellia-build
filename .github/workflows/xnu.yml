@@ -30,8 +30,8 @@ env:
 
 jobs:
   build:
-    # macos-14 ships Xcode 15.x, whose iig matches the xnu-8796 IORPC ABI
-    runs-on: macos-15
+    # Use an Intel runner while the macOS arm64 pool is capacity constrained.
+    runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
