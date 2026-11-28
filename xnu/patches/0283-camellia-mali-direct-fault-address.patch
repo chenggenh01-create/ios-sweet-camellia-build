@@ -1,0 +1,58 @@
+diff --git a/bsd/dev/sweet_touch_mtk.c b/bsd/dev/sweet_touch_mtk.c
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -2565,6 +2565,38 @@ sweet_mali_capture_direct(void *surface, vm_offset_t address,
+ 	__atomic_store_n(&mali_direct_state, MALI_LAYER_READY, __ATOMIC_RELEASE);
+ }
+ 
++static void
++mali_direct_log_fault(uint32_t raw, uint32_t status, uint64_t src, uint64_t dst,
++    uint64_t job, size_t bytes)
++{
++	uint32_t fault = mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTSTATUS);
++	uint64_t gpu = (uint64_t)mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTADDR_HI) << 32;
++	gpu |= mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTADDR_LO);
++	uint32_t mmu = mali_prd(mali_p_gpu, MALI_MMU_INT_RAWSTAT);
++	uint64_t root = 0, middle = 0, leaf = 0;
++
++	if (mali_pt_top != NULL && gpu < (1ull << 35)) {
++		root = mali_pt_top[(gpu >> 30) & 31];
++		if ((root & 3u) == MALI_PTE_TABLE) {
++			const uint64_t *table = (const uint64_t *)phystokv(root & MALI_PTE_ADDRESS);
++			middle = table[(gpu >> 21) & 511];
++			if ((middle & 3u) == MALI_PTE_TABLE) {
++				table = (const uint64_t *)phystokv(middle & MALI_PTE_ADDRESS);
++				leaf = table[(gpu >> 12) & 511];
++			}
++		}
++	}
++	printf("SWEET MALI: direct fault va=%016llx fault=%08x mmu=%08x raw=%08x slot=%08x\n",
++	    gpu, fault, mmu, raw, status);
++	printf("SWEET MALI: direct fault ttbr=%08x%08x cfg=%08x as_status=%08x top=%016llx\n",
++	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_TRANSTAB_HI),
++	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_TRANSTAB_LO),
++	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_TRANSCFG_LO),
++	    mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_STATUS), mali_pt_top_phys);
++	printf("SWEET MALI: direct fault ptes=%016llx/%016llx/%016llx src=%llx dst=%llx job=%llx bytes=%lu\n",
++	    root, middle, leaf, src, dst, job, (unsigned long)bytes);
++}
++
+ /* Map only the pages spanned by this range. The caller owns their lifetime. */
+ static bool
+ mali_map_range(uint64_t gpu, vm_offset_t address, size_t bytes, bool read_only)
+@@ -2847,13 +2879,12 @@ mali_compute_copy(uint32_t shader_mask, bool pixel_test,
+ 	}
+ 	status = mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS);
+ 	absolutetime_to_nanoseconds(mach_absolute_time() - submit_start, &job_ns);
+-	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
+ 
+ 	bool done = (raw & (MALI_JS1_DONE | MALI_JS1_FAULT)) == MALI_JS1_DONE && status == 0;
+ 	if (!done && direct != NULL) {
+-		printf("SWEET MALI: direct IOSurface job raw=%08x slot=%08x mmu=%08x\n",
+-		    raw, status, mali_prd(mali_p_gpu, MALI_AS0 + MALI_AS_FAULTSTATUS));
++		mali_direct_log_fault(raw, status, src_phys, dst_phys, job_phys, direct->bytes);
+ 	}
++	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
+ 	if ((!done || (translated && !mali_as0_update(0, 2))) &&
+ 	    !mali_gpu_recover(shader_mask)) {
+ 		printf("SWEET MALI: compute failed and reset failed; keeping GPU pages reserved\n");

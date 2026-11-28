@@ -109,10 +109,10 @@ jobs:
           set -o pipefail
           bash build.sh 2>&1 | tee /tmp/build.log
           echo "build.sh exit=$?"
-          if grep -F 'Skipping patch' /tmp/build.log | grep -F '0282-camellia-mali-direct-iosurface.patch'; then
+          if grep -F 'Skipping patch' /tmp/build.log | grep -E '028[23]-camellia-mali-direct-'; then
             exit 1
           fi
-          python3 -c 'from pathlib import Path; k = Path("fakeroot/System/Library/Kernels/kernel.development.camellia").read_bytes(); assert b"direct IOSurface %s surface=" in k'
+          python3 -c 'from pathlib import Path; k = Path("fakeroot/System/Library/Kernels/kernel.development.camellia").read_bytes(); assert b"direct fault va=" in k'
 
       # A failed XNU build used to mean downloading the 6 MB run log; keep the
       # error lines and the tail in a few-KB artifact instead.
