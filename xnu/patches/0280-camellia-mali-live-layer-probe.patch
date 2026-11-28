@@ -1,0 +1,218 @@
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -2494,10 +2494,41 @@
+ extern void *sweet_mali_surface_create(vm_offset_t *address, uint64_t *phys);
+ extern void sweet_mali_surface_finish(void *surface, bool passed, uint32_t color);
+ 
++enum {
++	MALI_LAYER_IDLE,
++	MALI_LAYER_ARMED,
++	MALI_LAYER_CAPTURING,
++	MALI_LAYER_READY,
++};
++static unsigned mali_layer_state;
++static uint32_t mali_layer_pixels[MALI_COPY_ELEMS];
++static uint32_t mali_layer_id;
++static uint64_t mali_layer_cpu_ns;
++
++void sweet_mali_capture_layer(const void *source, size_t row_bytes, uint32_t id);
++
++void
++sweet_mali_capture_layer(const void *source, size_t row_bytes, uint32_t id)
++{
++	unsigned armed = MALI_LAYER_ARMED;
++	if (row_bytes < sizeof(mali_layer_pixels) ||
++	    __atomic_load_n(&mali_layer_state, __ATOMIC_RELAXED) != MALI_LAYER_ARMED ||
++	    !__atomic_compare_exchange_n(&mali_layer_state, &armed, MALI_LAYER_CAPTURING,
++	    false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
++		return;
++	}
++	uint64_t start = mach_absolute_time();
++	memcpy(mali_layer_pixels, source, sizeof(mali_layer_pixels));
++	absolutetime_to_nanoseconds(mach_absolute_time() - start, &mali_layer_cpu_ns);
++	mali_layer_id = id;
++	__atomic_store_n(&mali_layer_state, MALI_LAYER_READY, __ATOMIC_RELEASE);
++}
++
+ /* False means the GPU could still hold references to our pages. */
+ static bool
+ mali_compute_copy(uint32_t shader_mask, bool pixel_test,
+-    vm_offset_t surface_address, uint64_t surface_phys, bool *surface_passed)
++    vm_offset_t surface_address, uint64_t surface_phys, bool *surface_passed,
++    const uint32_t *layer_pixels)
+ {
+ 	vm_offset_t srcpage = 0, dstpage = surface_address, isapage = 0, faupage = 0, descpage = 0, rsdpage = 0,
+ 	    tlspage = 0;
+@@ -2509,6 +2540,7 @@
+ 	volatile uint32_t *pixels;
+ 	unsigned guard_bad = 0;
+ 	int i, ok = 0;
++	uint64_t sync_start, submit_start, job_ns, sync_ns;
+ 
+ 	if ((!pixel_test && kmem_alloc(kernel_map, &srcpage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) ||
+@@ -2537,9 +2569,17 @@
+ 		src_phys = MALI_PIXEL_COLOR; /* u3.w0 carries a color instead of an address. */
+ 	} else {
+ 		memcpy((void *)isapage, mali_copy_isa, sizeof(mali_copy_isa));
+-		for (i = 0; i < MALI_COPY_ELEMS; i++) {
+-			*(volatile uint32_t *)(srcpage + (uint64_t)i * 4) =
+-			    0x5A5A0000u + (uint32_t)i;
++		if (layer_pixels != NULL) {
++			memcpy((void *)srcpage, layer_pixels, sizeof(mali_layer_pixels));
++			/* No source pixel can match an untouched destination word. */
++			for (i = 0; i < MALI_COPY_ELEMS; i++) {
++				pixels[i] = ~layer_pixels[i];
++			}
++		} else {
++			for (i = 0; i < MALI_COPY_ELEMS; i++) {
++				*(volatile uint32_t *)(srcpage + (uint64_t)i * 4) =
++				    0x5A5A0000u + (uint32_t)i;
++			}
+ 		}
+ 		src_phys = kvtophys(srcpage);
+ 	}
+@@ -2604,6 +2644,7 @@
+ 	j[30] = (uint32_t)fau_phys;
+ 	j[31] = (uint32_t)(fau_phys >> 32);     /* FAU address */
+ 
++	sync_start = mach_absolute_time();
+ 	if (srcpage != 0) {
+ 		FlushPoC_DcacheRegion(srcpage, PAGE_SIZE);
+ 	}
+@@ -2613,7 +2654,9 @@
+ 	FlushPoC_DcacheRegion(descpage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(rsdpage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(tlspage, PAGE_SIZE);
+-
++	uint64_t sync_ticks = mach_absolute_time() - sync_start;
++
++	submit_start = mach_absolute_time();
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_MASK, 0);
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
+ 	mali_pwr(mali_p_gpu, MALI_JS1 + MALI_JS_HEAD_NEXT_LO, (uint32_t)job_phys);
+@@ -2630,6 +2673,7 @@
+ 		delay(10);
+ 	}
+ 	status = mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS);
++	absolutetime_to_nanoseconds(mach_absolute_time() - submit_start, &job_ns);
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
+ 
+ 	if ((raw & (MALI_JS1_DONE | MALI_JS1_FAULT)) != MALI_JS1_DONE &&
+@@ -2637,12 +2681,17 @@
+ 		printf("SWEET MALI: compute failed and reset failed; keeping GPU pages reserved\n");
+ 		return false;
+ 	}
++	sync_start = mach_absolute_time();
+ 	FlushPoC_DcacheRegion(descpage, PAGE_SIZE);
+ 	exception = j[0];
+ 	FlushPoC_DcacheRegion(dstpage, PAGE_SIZE);
++	absolutetime_to_nanoseconds(sync_ticks + mach_absolute_time() - sync_start, &sync_ns);
+ 	for (i = 0; i < MALI_COPY_ELEMS; i++) {
+ 		uint32_t expected = pixel_test ? MALI_PIXEL_COLOR | (uint32_t)i :
+ 		    0x5A5A0000u + (uint32_t)i;
++		if (layer_pixels != NULL) {
++			expected = layer_pixels[i];
++		}
+ 		if (pixels[i] == expected) {
+ 			ok++;
+ 		}
+@@ -2662,6 +2711,14 @@
+ 		    "(raw=%08x slot=%08x exception=%08x)\n",
+ 		    surface_address != 0 ? "IOSurface" : "offscreen",
+ 		    passed ? "PASS" : "FAIL", ok, (int)MALI_COPY_ELEMS, guard_bad,
++		    raw, status, exception);
++	} else if (layer_pixels != NULL) {
++		bool passed = (raw & (MALI_JS1_DONE | MALI_JS1_FAULT)) == MALI_JS1_DONE &&
++		    status == 0 && exception == 1 && ok == MALI_COPY_ELEMS;
++		printf("SWEET MALI: live BGRA %s surface=%u %d/%d pixels "
++		    "cpu_copy=%lluns submit=%lluns cache_sync=%lluns "
++		    "(raw=%08x slot=%08x exception=%08x)\n", passed ? "PASS" : "FAIL",
++		    mali_layer_id, ok, MALI_COPY_ELEMS, mali_layer_cpu_ns, job_ns, sync_ns,
+ 		    raw, status, exception);
+ 	} else {
+ 		mali_compute_ok = (unsigned)ok;
+@@ -2723,7 +2780,7 @@
+ 	mali_chain_probe(page, phys, shader_mask);
+ 	mali_chain_bulk(shader_mask);
+ 	PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
+-	if (compute_test == 1 && !mali_compute_copy(shader_mask, false, 0, 0, NULL)) {
++	if (compute_test == 1 && !mali_compute_copy(shader_mask, false, 0, 0, NULL, NULL)) {
+ 		kmem_free(kernel_map, page, PAGE_SIZE);
+ 		return;
+ 	}
+@@ -2993,21 +3050,38 @@
+ 	    mali_prd(mali_p_gpu, 0x150), mali_prd(mali_p_gpu, 0x160));
+ 	int compute_test = 0;
+ 	PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
+-	if (compute_test == 2 || compute_test == 3) {
++	if (compute_test >= 2 && compute_test <= 4) {
+ 		mali_as0_update(0, 2);
+ 		uint32_t shader_mask = mali_prd(mali_p_gpu, 0x100);
+ 		if (compute_test == 2) {
+ 			printf("SWEET MALI: starting offscreen BGRA compute test (32x32)\n");
+-			(void)mali_compute_copy(shader_mask, true, 0, 0, NULL);
+-		} else {
++			(void)mali_compute_copy(shader_mask, true, 0, 0, NULL, NULL);
++		} else if (compute_test == 3) {
+ 			vm_offset_t address = 0;
+ 			uint64_t phys = 0;
+ 			bool passed = false;
+ 			void *surface = sweet_mali_surface_create(&address, &phys);
+ 			if (surface != NULL &&
+-			    mali_compute_copy(shader_mask, true, address, phys, &passed)) {
++			    mali_compute_copy(shader_mask, true, address, phys, &passed, NULL)) {
+ 				sweet_mali_surface_finish(surface, passed, MALI_PIXEL_COLOR);
+ 			}
++		} else {
++			printf("SWEET MALI: waiting for live BGRA layer\n");
++			__atomic_store_n(&mali_layer_state, MALI_LAYER_ARMED, __ATOMIC_RELEASE);
++			for (unsigned attempt = 0; attempt <= 300; attempt++) {
++				if (__atomic_load_n(&mali_layer_state, __ATOMIC_ACQUIRE) == MALI_LAYER_READY) {
++					(void)mali_compute_copy(shader_mask, false, 0, 0, NULL, mali_layer_pixels);
++					__atomic_store_n(&mali_layer_state, MALI_LAYER_IDLE, __ATOMIC_RELAXED);
++					return;
++				}
++				if (attempt < 300) {
++					touch_wait(100);
++				}
++			}
++			unsigned armed = MALI_LAYER_ARMED;
++			(void)__atomic_compare_exchange_n(&mali_layer_state, &armed, MALI_LAYER_IDLE,
++			    false, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
++			printf("SWEET MALI: live BGRA layer capture timed out\n");
+ 		}
+ 		return;
+ 	}
+@@ -3190,7 +3264,7 @@
+ 	sweet_mali_probe();
+ 	(void)PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
+ 	(void)PE_parse_boot_argn("sweetmalion", &gpu_enabled, sizeof(gpu_enabled));
+-	if (compute_test >= 1 && compute_test <= 3 && gpu_enabled == 1) {
++	if (compute_test >= 1 && compute_test <= 4 && gpu_enabled == 1) {
+ 		if (kernel_thread_start(mali_compute_thread, NULL, &thread) == KERN_SUCCESS) {
+ 			thread_deallocate(thread);
+ 		} else {
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -257,5 +257,7 @@
+ }
+ 
++extern "C" void sweet_mali_capture_layer(const void *source, size_t row_bytes, uint32_t id);
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+@@ -526,6 +528,12 @@
+ 				IOLog("SWEET FB: present copy t=%llums id %u w %d h %d rows %d..%d win %d/%d chunk %d\n",
+ 				    sweet_trace_ms(), id, w, h, y0, y1, win_start, win_len, sweet_chunk);
+ 			}
++			if (y0 < y1 && s->pixelFormat == 0x42475241 &&
++			    (uint64_t)(sx + w) * 4 <= s->bytesPerRow) {
++				sweet_mali_capture_layer((const void *)(src + s->offset +
++				    (uint64_t)(sy + y0) * s->bytesPerRow + (uint64_t)sx * 4),
++				    (size_t)w * 4, id);
++			}
+ 			if (sweet_chunk > 0) {
+ 				for (int32_t y = y0; y < y1; ) {
+ 					int32_t yend = y + sweet_chunk;
