@@ -1,0 +1,193 @@
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -2452,6 +2452,32 @@
+     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+ };
+ 
++/*
++ * Same launch layout as mali_copy_isa. Each invocation computes its own
++ * BGRA word as u3.w0 | global_id_x and stores it to u4 + 4 * global_id_x.
++ * The 15 instruction slots retain the bounds-check branch offset.
++ */
++static const uint32_t mali_pixel_isa[64] = {
++	0x80c08a3c, 0x00f0c004,
++	0x00000c40, 0x501fc030,
++	0x19c0cf3c, 0x00b4c000,
++	0x19c0c83c, 0x00b4c101,
++	0x00000041, 0x0091c400,
++	0x00000040, 0x0091c500,
++	0x1186c07c, 0x00b4c001,
++	0x00000088, 0x0091c200,
++	0x00000089, 0x0091c300,
++	0x00074442, 0x01abc200,
++	0x00000000, 0x0000c000,
++	0x00000000, 0x0000c000,
++	0x00000000, 0x0000c000,
++	0x58000042, 0x50614002,
++	0x00000000, 0x7800c000,
++};
++
++#define MALI_PIXEL_COLOR     0xff336000u
++#define MALI_PIXEL_GUARD     0xfca55a5au
++
+ /* v49: the boot-time compute result, reprinted every 10 s so a photo taken
+  * long after boot still shows it. */
+ static unsigned mali_compute_ok;
+@@ -2466,7 +2492,7 @@
+ 
+ /* False means the GPU could still hold references to our pages. */
+ static bool
+-mali_compute_copy(uint32_t shader_mask)
++mali_compute_copy(uint32_t shader_mask, bool pixel_test)
+ {
+ 	vm_offset_t srcpage = 0, dstpage = 0, isapage = 0, faupage = 0, descpage = 0, rsdpage = 0,
+ 	    tlspage = 0;
+@@ -2475,10 +2501,12 @@
+ 	volatile uint32_t *j, *rsd;
+ 	volatile uint64_t *fau;
+ 	uint32_t raw = 0, status, exception;
++	volatile uint32_t *pixels;
++	unsigned guard_bad = 0;
+ 	int i, ok = 0;
+ 
+-	if (kmem_alloc(kernel_map, &srcpage, PAGE_SIZE,
+-	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	if ((!pixel_test && kmem_alloc(kernel_map, &srcpage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) ||
+ 	    kmem_alloc(kernel_map, &dstpage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+ 	    kmem_alloc(kernel_map, &isapage, PAGE_SIZE,
+@@ -2495,19 +2523,32 @@
+ 		goto out;
+ 	}
+ 
+-	memcpy((void *)isapage, mali_copy_isa, sizeof(mali_copy_isa));
+-	for (i = 0; i < MALI_COPY_ELEMS; i++) {
+-		*(volatile uint32_t *)(srcpage + (uint64_t)i * 4) =
+-		    0x5A5A0000u + (uint32_t)i;
+-	}
+-
+-	src_phys = kvtophys(srcpage);
++	pixels = (volatile uint32_t *)dstpage;
++	if (pixel_test) {
++		memcpy((void *)isapage, mali_pixel_isa, sizeof(mali_pixel_isa));
++		for (unsigned word = 0; word < PAGE_SIZE / sizeof(*pixels); word++) {
++			pixels[word] = MALI_PIXEL_GUARD;
++		}
++		src_phys = MALI_PIXEL_COLOR; /* u3.w0 carries a color instead of an address. */
++	} else {
++		memcpy((void *)isapage, mali_copy_isa, sizeof(mali_copy_isa));
++		for (i = 0; i < MALI_COPY_ELEMS; i++) {
++			*(volatile uint32_t *)(srcpage + (uint64_t)i * 4) =
++			    0x5A5A0000u + (uint32_t)i;
++		}
++		src_phys = kvtophys(srcpage);
++	}
+ 	dst_phys = kvtophys(dstpage);
+ 	shader_phys = kvtophys(isapage);
+ 	rsd_phys = kvtophys(rsdpage);
+ 	tls_phys = kvtophys(tlspage);
+ 	fau_phys = kvtophys(faupage);
+ 	job_phys = kvtophys(descpage);          /* own page: 128-byte aligned */
++	if (src_phys == 0 || dst_phys == 0 || shader_phys == 0 ||
++	    rsd_phys == 0 || tls_phys == 0 || fau_phys == 0 || job_phys == 0) {
++		printf("SWEET MALI: missing physical backing for compute test\n");
++		goto out;
++	}
+ 
+ 	/*
+ 	 * FAU / push uniforms: sysvals first (num_workgroups[3] + printf pointer
+@@ -2558,7 +2599,9 @@
+ 	j[30] = (uint32_t)fau_phys;
+ 	j[31] = (uint32_t)(fau_phys >> 32);     /* FAU address */
+ 
+-	FlushPoC_DcacheRegion(srcpage, PAGE_SIZE);
++	if (srcpage != 0) {
++		FlushPoC_DcacheRegion(srcpage, PAGE_SIZE);
++	}
+ 	FlushPoC_DcacheRegion(dstpage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(isapage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(faupage, PAGE_SIZE);
+@@ -2584,24 +2627,39 @@
+ 	status = mali_prd(mali_p_gpu, MALI_JS1 + MALI_JS_STATUS);
+ 	mali_pwr(mali_p_gpu, MALI_JOB_INT_CLEAR, 0xffffffffu);
+ 
+-	if (!(raw & (MALI_JS1_DONE | MALI_JS1_FAULT)) &&
++	if ((raw & (MALI_JS1_DONE | MALI_JS1_FAULT)) != MALI_JS1_DONE &&
+ 	    !mali_gpu_recover(shader_mask)) {
+-		printf("SWEET MALI: compute timed out and reset failed; keeping GPU pages reserved\n");
++		printf("SWEET MALI: compute failed and reset failed; keeping GPU pages reserved\n");
+ 		return false;
+ 	}
+ 	FlushPoC_DcacheRegion(descpage, PAGE_SIZE);
+ 	exception = j[0];
+ 	FlushPoC_DcacheRegion(dstpage, PAGE_SIZE);
+ 	for (i = 0; i < MALI_COPY_ELEMS; i++) {
+-		if (*(volatile uint32_t *)(dstpage + (uint64_t)i * 4) ==
+-		    0x5A5A0000u + (uint32_t)i) {
++		uint32_t expected = pixel_test ? MALI_PIXEL_COLOR | (uint32_t)i :
++		    0x5A5A0000u + (uint32_t)i;
++		if (pixels[i] == expected) {
+ 			ok++;
+ 		}
+ 	}
+-	mali_compute_ok = (unsigned)ok;
+-	mali_compute_words = (unsigned)MALI_COPY_ELEMS;
+-	printf("SWEET MALI: compute copy %d/%d words ok (raw=%08x slot=%08x exception=%08x)\n",
+-	    ok, (int)MALI_COPY_ELEMS, raw, status, exception);
++	if (pixel_test) {
++		for (unsigned word = MALI_COPY_ELEMS; word < PAGE_SIZE / sizeof(*pixels); word++) {
++			if (pixels[word] != MALI_PIXEL_GUARD) {
++				guard_bad++;
++			}
++		}
++		bool passed = (raw & (MALI_JS1_DONE | MALI_JS1_FAULT)) == MALI_JS1_DONE &&
++		    status == 0 && exception == 1 && ok == MALI_COPY_ELEMS && guard_bad == 0;
++		printf("SWEET MALI: offscreen BGRA %s %d/%d pixels guard_bad=%u "
++		    "(raw=%08x slot=%08x exception=%08x)\n",
++		    passed ? "PASS" : "FAIL", ok, (int)MALI_COPY_ELEMS, guard_bad,
++		    raw, status, exception);
++	} else {
++		mali_compute_ok = (unsigned)ok;
++		mali_compute_words = (unsigned)MALI_COPY_ELEMS;
++		printf("SWEET MALI: compute copy %d/%d words ok (raw=%08x slot=%08x exception=%08x)\n",
++		    ok, (int)MALI_COPY_ELEMS, raw, status, exception);
++	}
+ 
+ out:
+ 	{
+@@ -2655,7 +2713,7 @@
+ 	mali_chain_probe(page, phys, shader_mask);
+ 	mali_chain_bulk(shader_mask);
+ 	PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
+-	if (compute_test == 1 && !mali_compute_copy(shader_mask)) {
++	if (compute_test == 1 && !mali_compute_copy(shader_mask, false)) {
+ 		kmem_free(kernel_map, page, PAGE_SIZE);
+ 		return;
+ 	}
+@@ -2923,6 +2981,16 @@
+ 	printf("SWEET MALI: GPU ready, GPU_ID=%08x shader=%08x tiler=%08x l2=%08x\n",
+ 	    mali_prd(mali_p_gpu, 0x000), mali_prd(mali_p_gpu, 0x140),
+ 	    mali_prd(mali_p_gpu, 0x150), mali_prd(mali_p_gpu, 0x160));
++	int compute_test = 0;
++	PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
++	if (compute_test == 2) {
++		/* Submit just one job after boot, on a standalone kernel buffer. */
++		mali_as0_update(0, 2);
++		printf("SWEET MALI: starting offscreen BGRA compute test (32x32)\n");
++		(void)mali_compute_copy(mali_prd(mali_p_gpu, 0x100), true);
++		return;
++	}
++
+ 	/* v31: ask the GPU to write a value into a page of ours. */
+ 	mali_first_job(mali_prd(mali_p_gpu, 0x100));
+ 	mali_powered = 1;
+@@ -3101,7 +3169,7 @@
+ 	sweet_mali_probe();
+ 	(void)PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
+ 	(void)PE_parse_boot_argn("sweetmalion", &gpu_enabled, sizeof(gpu_enabled));
+-	if (compute_test == 1 && gpu_enabled == 1) {
++	if ((compute_test == 1 || compute_test == 2) && gpu_enabled == 1) {
+ 		if (kernel_thread_start(mali_compute_thread, NULL, &thread) == KERN_SUCCESS) {
+ 			thread_deallocate(thread);
+ 		} else {
