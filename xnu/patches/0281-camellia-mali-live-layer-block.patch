@@ -1,0 +1,224 @@
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -2500,28 +2500,47 @@
+ 	MALI_LAYER_CAPTURING,
+ 	MALI_LAYER_READY,
+ };
++#define MALI_LAYER_ROWS 16u
++#define MALI_LAYER_ELEMS (MALI_COPY_ELEMS * MALI_LAYER_ROWS)
+ static unsigned mali_layer_state;
+-static uint32_t mali_layer_pixels[MALI_COPY_ELEMS];
++static uint32_t mali_layer_pixels[MALI_LAYER_ELEMS];
+ static uint32_t mali_layer_id;
+-static uint64_t mali_layer_cpu_ns;
+-
+-void sweet_mali_capture_layer(const void *source, size_t row_bytes, uint32_t id);
++static uint64_t mali_layer_capture_ns;
++
++void sweet_mali_capture_layer(const void *source, size_t width_bytes,
++    size_t stride, unsigned rows, uint32_t id);
+ 
+ void
+-sweet_mali_capture_layer(const void *source, size_t row_bytes, uint32_t id)
++sweet_mali_capture_layer(const void *source, size_t width_bytes,
++    size_t stride, unsigned rows, uint32_t id)
+ {
+ 	unsigned armed = MALI_LAYER_ARMED;
+-	if (row_bytes < sizeof(mali_layer_pixels) ||
+-	    __atomic_load_n(&mali_layer_state, __ATOMIC_RELAXED) != MALI_LAYER_ARMED ||
++	const size_t copy_bytes = MALI_COPY_ELEMS * sizeof(uint32_t);
++	if (__atomic_load_n(&mali_layer_state, __ATOMIC_RELAXED) != MALI_LAYER_ARMED ||
++	    rows < MALI_LAYER_ROWS || width_bytes < copy_bytes || stride < width_bytes ||
+ 	    !__atomic_compare_exchange_n(&mali_layer_state, &armed, MALI_LAYER_CAPTURING,
+ 	    false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+ 		return;
+ 	}
+ 	uint64_t start = mach_absolute_time();
+-	memcpy(mali_layer_pixels, source, sizeof(mali_layer_pixels));
+-	absolutetime_to_nanoseconds(mach_absolute_time() - start, &mali_layer_cpu_ns);
++	for (unsigned y = 0; y < MALI_LAYER_ROWS; y++) {
++		memcpy(&mali_layer_pixels[y * MALI_COPY_ELEMS],
++		    (const uint8_t *)source + y * stride, copy_bytes);
++	}
++	absolutetime_to_nanoseconds(mach_absolute_time() - start, &mali_layer_capture_ns);
+ 	mali_layer_id = id;
+ 	__atomic_store_n(&mali_layer_state, MALI_LAYER_READY, __ATOMIC_RELEASE);
++}
++
++static bool
++mali_contiguous_range(vm_offset_t address, uint64_t phys, vm_size_t size)
++{
++	for (vm_size_t offset = PAGE_SIZE; offset < size; offset += PAGE_SIZE) {
++		if (kvtophys(address + offset) != phys + offset) {
++			return false;
++		}
++	}
++	return true;
+ }
+ 
+ /* False means the GPU could still hold references to our pages. */
+@@ -2540,13 +2559,27 @@
+ 	volatile uint32_t *pixels;
+ 	unsigned guard_bad = 0;
+ 	int i, ok = 0;
+-	uint64_t sync_start, submit_start, job_ns, sync_ns;
+-
+-	if ((!pixel_test && kmem_alloc(kernel_map, &srcpage, PAGE_SIZE,
+-	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) ||
++	uint64_t sync_start, submit_start, job_ns, sync_ns, cpu_ns = 0;
++	const unsigned words = layer_pixels != NULL ? MALI_LAYER_ELEMS : MALI_COPY_ELEMS;
++	const vm_size_t buffer_size = round_page(words * sizeof(uint32_t));
++	const kma_flags_t buffer_flags = KMA_KOBJECT | KMA_ZERO | KMA_DATA;
++
++	if (layer_pixels != NULL) {
++		if (kmem_alloc_contig(kernel_map, &srcpage, buffer_size, 0, 0, 0,
++		    buffer_flags, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++		    kmem_alloc_contig(kernel_map, &dstpage, buffer_size, 0, 0, 0,
++		    buffer_flags, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++			printf("SWEET MALI: no contiguous buffers for live BGRA block\n");
++			goto out;
++		}
++	} else if ((!pixel_test && kmem_alloc(kernel_map, &srcpage, PAGE_SIZE,
++	    buffer_flags, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) ||
+ 	    (surface_address == 0 && kmem_alloc(kernel_map, &dstpage, PAGE_SIZE,
+-	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) ||
+-	    kmem_alloc(kernel_map, &isapage, PAGE_SIZE,
++	    buffer_flags, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS)) {
++		printf("SWEET MALI: no pixel buffers for compute test\n");
++		goto out;
++	}
++	if (kmem_alloc(kernel_map, &isapage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+ 	    kmem_alloc(kernel_map, &faupage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+@@ -2571,8 +2604,15 @@
+ 		memcpy((void *)isapage, mali_copy_isa, sizeof(mali_copy_isa));
+ 		if (layer_pixels != NULL) {
+ 			memcpy((void *)srcpage, layer_pixels, sizeof(mali_layer_pixels));
+-			/* No source pixel can match an untouched destination word. */
+-			for (i = 0; i < MALI_COPY_ELEMS; i++) {
++			uint64_t start = mach_absolute_time();
++			memcpy((void *)dstpage, (const void *)srcpage, sizeof(mali_layer_pixels));
++			absolutetime_to_nanoseconds(mach_absolute_time() - start, &cpu_ns);
++			for (i = 0; i < (int)words; i++) {
++				if (pixels[i] != layer_pixels[i]) {
++					printf("SWEET MALI: live BGRA block CPU copy mismatch at %d\n", i);
++					goto out;
++				}
++				/* Detect untouched words even on solid-color rows. */
+ 				pixels[i] = ~layer_pixels[i];
+ 			}
+ 		} else {
+@@ -2594,18 +2634,23 @@
+ 		printf("SWEET MALI: missing physical backing for compute test\n");
+ 		goto out;
+ 	}
++	if (layer_pixels != NULL && (!mali_contiguous_range(srcpage, src_phys, buffer_size) ||
++	    !mali_contiguous_range(dstpage, dst_phys, buffer_size))) {
++		printf("SWEET MALI: live BGRA block physical layout mismatch\n");
++		goto out;
++	}
+ 
+ 	/*
+ 	 * FAU / push uniforms: sysvals first (num_workgroups[3] + printf pointer
+ 	 * = 24 bytes), then the kernel arguments at byte 24.
+ 	 */
+ 	fau = (volatile uint64_t *)faupage;
+-	fau[0] = (uint64_t)(MALI_COPY_ELEMS / MALI_COPY_WG) | ((uint64_t)1 << 32);
++	fau[0] = (uint64_t)(words / MALI_COPY_WG) | ((uint64_t)1 << 32);
+ 	fau[1] = 1;
+ 	fau[2] = 0;
+ 	*(volatile uint64_t *)(faupage + MALI_FAU_OFFSET + 0) = src_phys;
+ 	*(volatile uint64_t *)(faupage + MALI_FAU_OFFSET + 8) = dst_phys;
+-	*(volatile uint32_t *)(faupage + MALI_FAU_OFFSET + 16) = MALI_COPY_ELEMS;
++	*(volatile uint32_t *)(faupage + MALI_FAU_OFFSET + 16) = words;
+ 
+ 	/*
+ 	 * Valhall's Shader Environment points at a Shader Program descriptor, not
+@@ -2627,7 +2672,7 @@
+ 	j[7] = 0;                               /* next = 0: end of the chain */
+ 	j[8] = (MALI_COPY_WG - 1);              /* workgroup size x/y/z, minus(1) */
+ 	j[9] = 1u | (2u << 14);                 /* task increment 1, axis Z */
+-	j[10] = MALI_COPY_ELEMS / MALI_COPY_WG;
++	j[10] = words / MALI_COPY_WG;
+ 	j[11] = 1;
+ 	j[12] = 1;
+ 	j[13] = 0;
+@@ -2646,9 +2691,9 @@
+ 
+ 	sync_start = mach_absolute_time();
+ 	if (srcpage != 0) {
+-		FlushPoC_DcacheRegion(srcpage, PAGE_SIZE);
+-	}
+-	FlushPoC_DcacheRegion(dstpage, PAGE_SIZE);
++		FlushPoC_DcacheRegion(srcpage, buffer_size);
++	}
++	FlushPoC_DcacheRegion(dstpage, buffer_size);
+ 	FlushPoC_DcacheRegion(isapage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(faupage, PAGE_SIZE);
+ 	FlushPoC_DcacheRegion(descpage, PAGE_SIZE);
+@@ -2684,9 +2729,9 @@
+ 	sync_start = mach_absolute_time();
+ 	FlushPoC_DcacheRegion(descpage, PAGE_SIZE);
+ 	exception = j[0];
+-	FlushPoC_DcacheRegion(dstpage, PAGE_SIZE);
++	FlushPoC_DcacheRegion(dstpage, buffer_size);
+ 	absolutetime_to_nanoseconds(sync_ticks + mach_absolute_time() - sync_start, &sync_ns);
+-	for (i = 0; i < MALI_COPY_ELEMS; i++) {
++	for (i = 0; i < (int)words; i++) {
+ 		uint32_t expected = pixel_test ? MALI_PIXEL_COLOR | (uint32_t)i :
+ 		    0x5A5A0000u + (uint32_t)i;
+ 		if (layer_pixels != NULL) {
+@@ -2714,11 +2759,12 @@
+ 		    raw, status, exception);
+ 	} else if (layer_pixels != NULL) {
+ 		bool passed = (raw & (MALI_JS1_DONE | MALI_JS1_FAULT)) == MALI_JS1_DONE &&
+-		    status == 0 && exception == 1 && ok == MALI_COPY_ELEMS;
+-		printf("SWEET MALI: live BGRA %s surface=%u %d/%d pixels "
+-		    "cpu_copy=%lluns submit=%lluns cache_sync=%lluns "
++		    status == 0 && exception == 1 && ok == (int)words;
++		printf("SWEET MALI: live BGRA block %s surface=%u %ux%u %d/%u pixels "
++		    "capture=%lluns cpu_copy=%lluns submit=%lluns cache_sync=%lluns "
+ 		    "(raw=%08x slot=%08x exception=%08x)\n", passed ? "PASS" : "FAIL",
+-		    mali_layer_id, ok, MALI_COPY_ELEMS, mali_layer_cpu_ns, job_ns, sync_ns,
++		    mali_layer_id, MALI_COPY_ELEMS, MALI_LAYER_ROWS, ok, words,
++		    mali_layer_capture_ns, cpu_ns, job_ns, sync_ns,
+ 		    raw, status, exception);
+ 	} else {
+ 		mali_compute_ok = (unsigned)ok;
+@@ -2728,10 +2774,14 @@
+ 	}
+ 
+ out:
++	if (srcpage != 0) {
++		kmem_free(kernel_map, srcpage, buffer_size);
++	}
++	if (surface_address == 0 && dstpage != 0) {
++		kmem_free(kernel_map, dstpage, buffer_size);
++	}
+ 	{
+-		const vm_offset_t pages[] = { srcpage, surface_address == 0 ? dstpage : 0,
+-			isapage, faupage,
+-			descpage, rsdpage, tlspage };
++		const vm_offset_t pages[] = { isapage, faupage, descpage, rsdpage, tlspage };
+ 
+ 		for (unsigned p = 0; p < sizeof(pages) / sizeof(pages[0]); p++) {
+ 			if (pages[p] != 0) {
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1,4 +1,5 @@
+-extern "C" void sweet_mali_capture_layer(const void *source, size_t row_bytes, uint32_t id);
++extern "C" void sweet_mali_capture_layer(const void *source, size_t width_bytes,
++    size_t stride, unsigned rows, uint32_t id);
+ 
+ void
+ AppleCLCD::present(const uint8_t *rec)
+@@ -274,7 +275,7 @@
+ 			    (uint64_t)(sx + w) * 4 <= s->bytesPerRow) {
+ 				sweet_mali_capture_layer((const void *)(src + s->offset +
+ 				    (uint64_t)(sy + y0) * s->bytesPerRow + (uint64_t)sx * 4),
+-				    (size_t)w * 4, id);
++				    (size_t)w * 4, s->bytesPerRow, (unsigned)(y1 - y0), id);
+ 			}
+ 			if (sweet_chunk > 0) {
+ 				for (int32_t y = y0; y < y1; ) {
