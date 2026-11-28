@@ -1,0 +1,240 @@
+--- a/bsd/dev/sweet_touch_mtk.c
++++ b/bsd/dev/sweet_touch_mtk.c
+@@ -2490,11 +2490,16 @@
+ #define MALI_JS1_DONE        (1u << 1)
+ #define MALI_JS1_FAULT       (1u << 17)
+ 
++/* The IOSurface diagnostic retains the descriptor while DMA is outstanding. */
++extern void *sweet_mali_surface_create(vm_offset_t *address, uint64_t *phys);
++extern void sweet_mali_surface_finish(void *surface, bool passed, uint32_t color);
++
+ /* False means the GPU could still hold references to our pages. */
+ static bool
+-mali_compute_copy(uint32_t shader_mask, bool pixel_test)
+-{
+-	vm_offset_t srcpage = 0, dstpage = 0, isapage = 0, faupage = 0, descpage = 0, rsdpage = 0,
++mali_compute_copy(uint32_t shader_mask, bool pixel_test,
++    vm_offset_t surface_address, uint64_t surface_phys, bool *surface_passed)
++{
++	vm_offset_t srcpage = 0, dstpage = surface_address, isapage = 0, faupage = 0, descpage = 0, rsdpage = 0,
+ 	    tlspage = 0;
+ 	uint64_t src_phys, dst_phys, shader_phys, job_phys, fau_phys, rsd_phys,
+ 	    tls_phys;
+@@ -2507,8 +2512,8 @@
+ 
+ 	if ((!pixel_test && kmem_alloc(kernel_map, &srcpage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) ||
+-	    kmem_alloc(kernel_map, &dstpage, PAGE_SIZE,
+-	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
++	    (surface_address == 0 && kmem_alloc(kernel_map, &dstpage, PAGE_SIZE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) ||
+ 	    kmem_alloc(kernel_map, &isapage, PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+ 	    kmem_alloc(kernel_map, &faupage, PAGE_SIZE,
+@@ -2538,7 +2543,7 @@
+ 		}
+ 		src_phys = kvtophys(srcpage);
+ 	}
+-	dst_phys = kvtophys(dstpage);
++	dst_phys = surface_address != 0 ? surface_phys : kvtophys(dstpage);
+ 	shader_phys = kvtophys(isapage);
+ 	rsd_phys = kvtophys(rsdpage);
+ 	tls_phys = kvtophys(tlspage);
+@@ -2650,8 +2655,12 @@
+ 		}
+ 		bool passed = (raw & (MALI_JS1_DONE | MALI_JS1_FAULT)) == MALI_JS1_DONE &&
+ 		    status == 0 && exception == 1 && ok == MALI_COPY_ELEMS && guard_bad == 0;
+-		printf("SWEET MALI: offscreen BGRA %s %d/%d pixels guard_bad=%u "
++		if (surface_passed != NULL) {
++			*surface_passed = passed;
++		}
++		printf("SWEET MALI: %s BGRA %s %d/%d pixels guard_bad=%u "
+ 		    "(raw=%08x slot=%08x exception=%08x)\n",
++		    surface_address != 0 ? "IOSurface" : "offscreen",
+ 		    passed ? "PASS" : "FAIL", ok, (int)MALI_COPY_ELEMS, guard_bad,
+ 		    raw, status, exception);
+ 	} else {
+@@ -2663,7 +2672,8 @@
+ 
+ out:
+ 	{
+-		const vm_offset_t pages[] = { srcpage, dstpage, isapage, faupage,
++		const vm_offset_t pages[] = { srcpage, surface_address == 0 ? dstpage : 0,
++			isapage, faupage,
+ 			descpage, rsdpage, tlspage };
+ 
+ 		for (unsigned p = 0; p < sizeof(pages) / sizeof(pages[0]); p++) {
+@@ -2713,7 +2723,7 @@
+ 	mali_chain_probe(page, phys, shader_mask);
+ 	mali_chain_bulk(shader_mask);
+ 	PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
+-	if (compute_test == 1 && !mali_compute_copy(shader_mask, false)) {
++	if (compute_test == 1 && !mali_compute_copy(shader_mask, false, 0, 0, NULL)) {
+ 		kmem_free(kernel_map, page, PAGE_SIZE);
+ 		return;
+ 	}
+@@ -2983,11 +2993,22 @@
+ 	    mali_prd(mali_p_gpu, 0x150), mali_prd(mali_p_gpu, 0x160));
+ 	int compute_test = 0;
+ 	PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
+-	if (compute_test == 2) {
+-		/* Submit just one job after boot, on a standalone kernel buffer. */
++	if (compute_test == 2 || compute_test == 3) {
+ 		mali_as0_update(0, 2);
+-		printf("SWEET MALI: starting offscreen BGRA compute test (32x32)\n");
+-		(void)mali_compute_copy(mali_prd(mali_p_gpu, 0x100), true);
++		uint32_t shader_mask = mali_prd(mali_p_gpu, 0x100);
++		if (compute_test == 2) {
++			printf("SWEET MALI: starting offscreen BGRA compute test (32x32)\n");
++			(void)mali_compute_copy(shader_mask, true, 0, 0, NULL);
++		} else {
++			vm_offset_t address = 0;
++			uint64_t phys = 0;
++			bool passed = false;
++			void *surface = sweet_mali_surface_create(&address, &phys);
++			if (surface != NULL &&
++			    mali_compute_copy(shader_mask, true, address, phys, &passed)) {
++				sweet_mali_surface_finish(surface, passed, MALI_PIXEL_COLOR);
++			}
++		}
+ 		return;
+ 	}
+ 
+@@ -3169,7 +3190,7 @@
+ 	sweet_mali_probe();
+ 	(void)PE_parse_boot_argn("sweetcomputetest", &compute_test, sizeof(compute_test));
+ 	(void)PE_parse_boot_argn("sweetmalion", &gpu_enabled, sizeof(gpu_enabled));
+-	if ((compute_test == 1 || compute_test == 2) && gpu_enabled == 1) {
++	if (compute_test >= 1 && compute_test <= 3 && gpu_enabled == 1) {
+ 		if (kernel_thread_start(mali_compute_thread, NULL, &thread) == KERN_SUCCESS) {
+ 			thread_deallocate(thread);
+ 		} else {
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -70,6 +70,9 @@
+ 
+ static IOLock       *sweet_surface_lock;
+ static SweetSurface *sweet_surface_table[SWEET_SURFACE_MAX_ID];
++static SweetSurface *sweet_mali_pending_surface;
++static uint32_t sweet_mali_pending_color;
++static constexpr unsigned kSweetMaliTestWidth = 32;
+ static uint32_t      sweet_surface_users[SWEET_SURFACE_MAX_ID];
+ static uint32_t      sweet_surface_next_id = 1;
+ static uint32_t      sweet_surface_creates_logged;
+@@ -231,6 +234,106 @@
+ 	}
+ 	bzero(s->state->getBytesNoCopy(), page_size);
+ 	return s;
++}
++
++/*
++ * The test buffer has the same backing type and cache attributes as a
++ * surface created by IOSurface.framework. It has no public registry ID.
++ */
++extern "C" void *
++sweet_mali_surface_create(vm_offset_t *address, uint64_t *phys)
++{
++	SweetSurface *surface = sweet_surface_alloc();
++	if (surface == NULL) {
++		IOLog("SWEET MALI: IOSurface allocation failed\n");
++		return NULL;
++	}
++
++	surface->width = surface->height = kSweetMaliTestWidth;
++	surface->bytesPerRow = kSweetMaliTestWidth * sizeof(uint32_t);
++	surface->bytesPerElement = sizeof(uint32_t);
++	surface->elementWidth = surface->elementHeight = 1;
++	surface->pixelFormat = 0x42475241; /* BGRA */
++	surface->allocSize = page_size;
++	surface->mapCache = kIOMapDefaultCache;
++
++	IOByteCount length = 0;
++	uint64_t previous_wired = (uint64_t)OSAddAtomic64(surface->allocSize,
++	    (volatile SInt64 *)&sweet_surface_wired);
++	if (previous_wired + surface->allocSize <= SWEET_SURFACE_WIRED_MAX) {
++		surface->memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++		    kIODirectionInOut | kIOMemoryKernelUserShared, surface->allocSize, page_size);
++	}
++	if (surface->memory == NULL) {
++		OSAddAtomic64(-(SInt64)surface->allocSize, (volatile SInt64 *)&sweet_surface_wired);
++	} else {
++		*address = surface->kernelAddress();
++		*phys = surface->memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
++		if (*address != 0 && *phys != 0 && length >= surface->allocSize &&
++		    (*phys & (page_size - 1)) == 0) {
++			return surface;
++		}
++	}
++	IOLog("SWEET MALI: IOSurface backing unavailable or fragmented\n");
++	surface->release();
++	return NULL;
++}
++
++extern "C" void
++sweet_mali_surface_finish(void *opaque, bool passed, uint32_t color)
++{
++	SweetSurface *surface = static_cast<SweetSurface *>(opaque);
++	if (!passed) {
++		surface->release();
++		return;
++	}
++
++	/* The GPU worker runs once. Release/acquire publishes completed pixels. */
++	sweet_mali_pending_color = color;
++	__atomic_store_n(&sweet_mali_pending_surface, surface, __ATOMIC_RELEASE);
++	IOLog("SWEET MALI: IOSurface ready for next app lock\n");
++}
++
++static void
++sweet_mali_surface_readback(task_t task)
++{
++	if (__atomic_load_n(&sweet_mali_pending_surface, __ATOMIC_ACQUIRE) == NULL ||
++	    task != current_task()) {
++		return;
++	}
++	SweetSurface *surface = __atomic_exchange_n(&sweet_mali_pending_surface,
++	    static_cast<SweetSurface *>(NULL), __ATOMIC_ACQ_REL);
++	if (surface == NULL) {
++		return;
++	}
++
++	IOMemoryMap *mapping = surface->memory->createMappingInTask(task, 0,
++	    kIOMapAnywhere | kIOMapReadOnly | surface->mapCache);
++	bool mapped = mapping != NULL;
++	unsigned matched = 0;
++	int error = 0;
++	if (mapped) {
++		uint32_t row[kSweetMaliTestWidth];
++		for (unsigned y = 0; y < kSweetMaliTestWidth; y++) {
++			error = copyin((user_addr_t)mapping->getAddress() + y * sizeof(row),
++			    row, sizeof(row));
++			if (error != 0) {
++				break;
++			}
++			for (unsigned x = 0; x < kSweetMaliTestWidth; x++) {
++				if (row[x] == (sweet_mali_pending_color | (y * kSweetMaliTestWidth + x))) {
++					matched++;
++				}
++			}
++		}
++		mapping->release();
++	}
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	unsigned total = kSweetMaliTestWidth * kSweetMaliTestWidth;
++	IOLog("SWEET MALI: IOSurface app mapping %s %u/%u pixels proc=%s map=%u error=%d\n",
++	    matched == total ? "PASS" : "FAIL", matched, total, name, mapped, error);
++	surface->release();
+ }
+ 
+ static bool
+@@ -897,6 +1000,9 @@
+ 	}
+ 	IOReturn ret = sweet_surface_seed_out(s, seedOut, false);
+ 	s->release();
++	if (ret == kIOReturnSuccess) {
++		sweet_mali_surface_readback(fTask);
++	}
+ 	return ret;
+ }
+ 
