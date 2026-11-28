@@ -206,14 +206,17 @@
  			if (pages[p] != 0) {
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -1,4 +1,5 @@
+@@ -257,7 +257,8 @@
+ }
+ 
 -extern "C" void sweet_mali_capture_layer(const void *source, size_t row_bytes, uint32_t id);
 +extern "C" void sweet_mali_capture_layer(const void *source, size_t width_bytes,
 +    size_t stride, unsigned rows, uint32_t id);
  
  void
  AppleCLCD::present(const uint8_t *rec)
-@@ -274,7 +275,7 @@
+ {
+@@ -530,7 +531,7 @@
  			    (uint64_t)(sx + w) * 4 <= s->bytesPerRow) {
  				sweet_mali_capture_layer((const void *)(src + s->offset +
  				    (uint64_t)(sy + y0) * s->bytesPerRow + (uint64_t)sx * 4),
