@@ -1,0 +1,37 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -782,4 +782,11 @@
+ 	kprintf("KB: before domaininit\n");
+ #if !defined(SWEET)
+ 	domaininit();
++#else
++	int enable_system_domain = 0;
++	if (PE_parse_boot_argn("sweetpfsystem", &enable_system_domain,
++	    sizeof(enable_system_domain)) && enable_system_domain == 1) {
++		extern void sweet_system_domain_init(void);
++		sweet_system_domain_init();
++	}
+ #endif
+--- a/bsd/kern/uipc_domain.c
++++ b/bsd/kern/uipc_domain.c
+@@ -709,4 +709,20 @@
+ }
+ 
++#if defined(SWEET)
++void sweet_system_domain_init(void);
++
++/* configd's KernelEventMonitor opens a PF_SYSTEM event socket at startup. */
++void
++sweet_system_domain_init(void)
++{
++	eventhandler_lists_ctxt_init(&protoctl_evhdlr_ctxt);
++	domain_guard_t guard = domain_guard_deploy();
++	attach_domain(&systemdomain_s);
++	init_domain(&systemdomain_s);
++	domain_guard_release(guard);
++	printf("SWEET: PF_SYSTEM domain initialized\n");
++}
++#endif
++
+ void
+ domaininit(void)
